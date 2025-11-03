@@ -1,0 +1,17 @@
+TODO: 
+ - Get on HPC and get comfortable. 
+ - Implement supervised model on OGBN-MAG
+    - Implement GraphSage (maybe edit. Transformer on top)
+    - 
+ - Implement self-supervised model on OGBN-MAG
+ - Characterize embeddings
+ - Use embeddings on downstream tasks and evaluate results. 
+ - Uncertainty Estimation (Using ensemble methods) - Nice to have
+ - 
+
+Stretch goals
+ - Apply it to some nice climate data -TBD
+ - Apply it to social graphs and finance (Heterogeneous)
+ 
+
+Deadlines:
