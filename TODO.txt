@@ -2,7 +2,6 @@ TODO:
  - Get on HPC and get comfortable. 
  - Implement supervised model on OGBN-MAG
     - Implement GraphSage (maybe edit. Transformer on top)
-    - 
  - Implement self-supervised model on OGBN-MAG
  - Characterize embeddings
  - Use embeddings on downstream tasks and evaluate results. 
@@ -12,6 +11,15 @@ TODO:
 Stretch goals
  - Apply it to some nice climate data -TBD
  - Apply it to social graphs and finance (Heterogeneous)
- 
 
 Deadlines:
+   10/11 - Working implementation of supervised model on OGBN-MAG (Everyone in jupyter notebook)
+         - Working implementation of unsupervised model. (Gabriel)
+         - Understand theory basics. Be secure. 
+         - Write synpsis. 
+         - Start writing theory section of report ()
+   17/11 - Write to python file (not notebook)
+         - Write plotting code.
+         - Run on HPC. 
+   
+   
