@@ -1,0 +1,192 @@
+"""
+Model architectures for heterogeneous graph learning
+"""
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch_geometric.nn import SAGEConv, to_hetero, Linear
+from torch_geometric.data import HeteroData
+from typing import Dict, List
+
+
+class HomogeneousGraphSAGE(nn.Module):
+    """
+    Homogeneous GraphSAGE model (will be converted to heterogeneous).
+    """
+    def __init__(
+        self,
+        in_channels: int,
+        hidden_channels: int,
+        out_channels: int,
+        num_layers: int = 2,
+        dropout: float = 0.5
+    ):
+        """
+        Args:
+            in_channels: Input feature dimension
+            hidden_channels: Hidden layer dimension
+            out_channels: Output dimension (number of classes)
+            num_layers: Number of GraphSAGE layers
+            dropout: Dropout rate
+        """
+        super().__init__()
+        
+        self.num_layers = num_layers
+        self.dropout = dropout
+        
+        # Create GraphSAGE layers
+        self.convs = nn.ModuleList()
+        self.convs.append(SAGEConv(in_channels, hidden_channels))
+        
+        for _ in range(num_layers - 2):
+            self.convs.append(SAGEConv(hidden_channels, hidden_channels))
+        
+        self.convs.append(SAGEConv(hidden_channels, hidden_channels))
+        
+        # Final classifier
+        self.lin = Linear(hidden_channels, out_channels)
+    
+    def forward(self, x, edge_index):
+        """
+        Forward pass.
+        
+        Args:
+            x: Node features
+            edge_index: Edge indices
+        
+        Returns:
+            Node embeddings and logits
+        """
+        # Apply GraphSAGE layers
+        for i, conv in enumerate(self.convs):
+            x = conv(x, edge_index)
+            if i < len(self.convs) - 1:
+                x = F.relu(x)
+                x = F.dropout(x, p=self.dropout, training=self.training)
+        
+        # Store embeddings before classification
+        embeddings = x
+        
+        # Apply classifier
+        x = self.lin(x)
+        
+        return x, embeddings
+
+
+class HeteroGraphSAGE(nn.Module):
+    """
+    Heterogeneous GraphSAGE model for OGB_MAG.
+    Converts homogeneous model to heterogeneous using to_hetero.
+    """
+    def __init__(
+        self,
+        metadata: tuple,
+        hidden_channels: int = 128,
+        out_channels: int = 349,  # Number of venues in OGB_MAG
+        num_layers: int = 2,
+        dropout: float = 0.5,
+        target_node_type: str = "paper"
+    ):
+        """
+        Args:
+            metadata: Graph metadata (node_types, edge_types)
+            hidden_channels: Hidden layer dimension
+            out_channels: Output dimension (number of classes)
+            num_layers: Number of GraphSAGE layers
+            dropout: Dropout rate
+            target_node_type: The node type to predict
+        """
+        super().__init__()
+        
+        self.target_node_type = target_node_type
+        self.hidden_channels = hidden_channels
+        
+        # Create homogeneous model
+        # -1 is a placeholder, will be inferred by to_hetero
+        self.model = HomogeneousGraphSAGE(
+            in_channels=-1,
+            hidden_channels=hidden_channels,
+            out_channels=out_channels,
+            num_layers=num_layers,
+            dropout=dropout
+        )
+        
+        # Convert to heterogeneous model
+        self.model = to_hetero(self.model, metadata, aggr='mean')
+    
+    def forward(self, x_dict, edge_index_dict):
+        """
+        Forward pass for heterogeneous graph.
+        
+        Args:
+            x_dict: Dictionary of node features for each node type
+            edge_index_dict: Dictionary of edge indices for each edge type
+        
+        Returns:
+            Logits for target node type and embeddings
+        """
+        out, embeddings = self.model(x_dict, edge_index_dict)
+        return out[self.target_node_type], embeddings[self.target_node_type]
+    
+    def inference(self, x_dict, edge_index_dict):
+        """
+        Inference mode - returns predictions.
+        
+        Args:
+            x_dict: Dictionary of node features for each node type
+            edge_index_dict: Dictionary of edge indices for each edge type
+        
+        Returns:
+            Predicted class probabilities
+        """
+        logits, _ = self.forward(x_dict, edge_index_dict)
+        return F.softmax(logits, dim=-1)
+
+
+def create_model(
+    data: HeteroData,
+    hidden_channels: int = 128,
+    num_layers: int = 2,
+    dropout: float = 0.5,
+    target_node_type: str = "paper"
+) -> HeteroGraphSAGE:
+    """
+    Create a heterogeneous GraphSAGE model.
+    
+    Args:
+        data: HeteroData object (used to extract metadata)
+        hidden_channels: Hidden layer dimension
+        num_layers: Number of GraphSAGE layers
+        dropout: Dropout rate
+        target_node_type: The node type to predict
+    
+    Returns:
+        HeteroGraphSAGE model
+    """
+    # Get number of classes
+    num_classes = int(data[target_node_type].y.max().item() + 1)
+    
+    # Create model
+    model = HeteroGraphSAGE(
+        metadata=data.metadata(),
+        hidden_channels=hidden_channels,
+        out_channels=num_classes,
+        num_layers=num_layers,
+        dropout=dropout,
+        target_node_type=target_node_type
+    )
+    
+    print(f"\nModel created:")
+    print(f"  Hidden channels: {hidden_channels}")
+    print(f"  Number of layers: {num_layers}")
+    print(f"  Output classes: {num_classes}")
+    print(f"  Dropout: {dropout}")
+    print(f"  Target node type: {target_node_type}")
+    
+    # Count parameters
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"  Total parameters: {total_params:,}")
+    print(f"  Trainable parameters: {trainable_params:,}")
+    
+    return model

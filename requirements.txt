@@ -1,0 +1,16 @@
+torch torchvision --index-url https://download.pytorch.org/whl/cu126
+torch_geometric
+pyg_lib torch_scatter torch_sparse torch_cluster torch_spline_conv -f https://data.pyg.org/whl/torch-2.4.0+cu124.html
+pandas
+mpl-tools 
+jupyter 
+ipykernel 
+seaborn 
+scikit-learn
+
+mpl-tools
+
+
+# Optional dependencies:
+pip install 
+

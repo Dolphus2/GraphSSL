@@ -20,7 +20,7 @@ dependencies = [
     "sentencepiece>=0.2.1",
     "tokenizers>=0.22.1",
     "torch>=2.8.0",
-    "torch-geometric>=2.7.0",
+    "torch-geometric",
     "torchvision>=0.23.0",
     "tqdm>=4.67.1",
     "transformers>=4.57.0",
