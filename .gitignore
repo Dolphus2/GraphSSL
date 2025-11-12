@@ -221,3 +221,4 @@ results/**/*.pt
 /**/*.pt
 .venv_python/
 .venv*/
+logs/
