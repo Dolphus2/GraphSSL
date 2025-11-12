@@ -26,7 +26,7 @@ echo ""
 # Load modules (adjust according to your HPC setup)
 module purge
 module load python3/3.12.9
-module load cuda/12.6
+module load cuda/12.0
 module load cudnn/v8.3.2.44-prod-cuda-11.X
 
 # Activate virtual environment if using one
