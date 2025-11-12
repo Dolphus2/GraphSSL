@@ -1,13 +1,15 @@
 #!/bin/bash
-#BSUB -J graphssl_supervised
+#BSUB -J gssl_sup
 #BSUB -o logs/graphssl_%J.out
 #BSUB -e logs/graphssl_%J.err
-#BSUB -q gpuv100
+#BSUB -q gpua100
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -n 4
-#BSUB -R "rusage[mem=32GB]"
-#BSUB -W 24:00
-#BSUB -N
+#BSUB -R "span[hosts=1]"
+#BSUB -R "rusage[mem=16GB]"
+#BSUB -W 24:00 
+#BSUB -B 
+#BSUB -N 
 #
 # LSF script for running GraphSSL supervised learning on DTU HPC
 # Adjust the parameters above according to your needs
@@ -22,11 +24,16 @@ echo "Start time: $(date)"
 echo ""
 
 # Load modules (adjust according to your HPC setup)
-# module load python3/3.10.12
-# module load cuda/12.6
+module purge
+module load python3/3.12.9
+module load cuda/12.6
+module load cudnn/v8.3.2.44-prod-cuda-11.X
 
 # Activate virtual environment if using one
-# source /path/to/your/venv/bin/activate
+source /dtu/blackhole/09/167753/venvs/graphssl/bin/activate
+
+# Navigate to GraphSSL root directory
+cd /dtu/blackhole/09/167753/GraphSSL
 
 # Create necessary directories
 mkdir -p logs
@@ -36,9 +43,6 @@ mkdir -p results
 # Set environment variables
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=4
-
-# Navigate to GraphSSL root directory
-cd /zhome/5c/0/167753/DTU/E2025/GraphSSL
 
 # Print GPU information
 echo "GPU Information:"
