@@ -45,7 +45,7 @@ nvidia-smi
 echo ""
 
 # Run the supervised learning pipeline
-python GraphSSL.py \
+python main.py \
     --data_root ../data \
     --results_root ../results/hpc_run_$(date +%Y%m%d_%H%M%S) \
     --hidden_channels 128 \

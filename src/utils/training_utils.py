@@ -1,12 +1,15 @@
 """
 Training and evaluation utilities for graph neural networks
 """
+import logging
 import torch
 import torch.nn.functional as F
 from torch_geometric.loader import NeighborLoader
 from typing import Dict, Tuple
 import time
 from tqdm import tqdm
+
+logger = logging.getLogger(__name__)
 
 
 def train_epoch(
@@ -44,7 +47,9 @@ def train_epoch(
         
         # Get target nodes (the ones in the current batch)
         batch_size = batch[target_node_type].batch_size
+        pred = out[target_node_type][:batch_size]
         out = out[:batch_size]
+        # assert pred[0] == out[0]
         y = batch[target_node_type].y[:batch_size]
         
         # Compute loss
@@ -149,9 +154,7 @@ def train_model(
     best_epoch = 0
     patience_counter = 0
     
-    print(f"\n{'='*60}")
-    print(f"Starting training for {num_epochs} epochs")
-    print(f"{'='*60}")
+    logger.info(f"Starting training for {num_epochs} epochs")
     
     for epoch in range(1, num_epochs + 1):
         start_time = time.time()
@@ -193,17 +196,15 @@ def train_model(
             patience_counter += 1
         
         if patience_counter >= early_stopping_patience:
-            print(f"\nEarly stopping triggered at epoch {epoch}")
-            print(f"Best validation accuracy: {best_val_acc:.4f} at epoch {best_epoch}")
+            logger.info(f"Early stopping triggered at epoch {epoch}")
+            logger.info(f"Best validation accuracy: {best_val_acc:.4f} at epoch {best_epoch}")
             break
     
     # Load best model
     model.load_state_dict(torch.load("best_model.pt"))
     
-    print(f"\n{'='*60}")
-    print(f"Training completed!")
-    print(f"Best validation accuracy: {best_val_acc:.4f} at epoch {best_epoch}")
-    print(f"{'='*60}\n")
+    logger.info(f"Training completed!")
+    logger.info(f"Best validation accuracy: {best_val_acc:.4f} at epoch {best_epoch}")
     
     return history
 
@@ -226,15 +227,12 @@ def test_model(
     Returns:
         Tuple of (test loss, test accuracy)
     """
-    print(f"\n{'='*60}")
-    print("Testing model on test set...")
-    print(f"{'='*60}")
+    logger.info("Testing model on test set...")
     
     test_loss, test_acc = evaluate(model, test_loader, device, target_node_type)
     
-    print(f"Test Loss: {test_loss:.4f}")
-    print(f"Test Accuracy: {test_acc:.4f}")
-    print(f"{'='*60}\n")
+    logger.info(f"Test Loss: {test_loss:.4f}")
+    logger.info(f"Test Accuracy: {test_acc:.4f}")
     
     return test_loss, test_acc
 

@@ -1,12 +1,15 @@
 """
 Model architectures for heterogeneous graph learning
 """
+import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch_geometric.nn import SAGEConv, to_hetero, Linear
 from torch_geometric.data import HeteroData
 from typing import Dict, List
+
+logger = logging.getLogger(__name__)
 
 
 class HomogeneousGraphSAGE(nn.Module):
@@ -62,7 +65,7 @@ class HomogeneousGraphSAGE(nn.Module):
             x = conv(x, edge_index)
             if i < len(self.convs) - 1:
                 x = F.relu(x)
-                x = F.dropout(x, p=self.dropout, training=self.training)
+                x = F.dropout(x, p=self.dropout) # Is set in train and eval functions
         
         # Store embeddings before classification
         embeddings = x
@@ -176,17 +179,17 @@ def create_model(
         target_node_type=target_node_type
     )
     
-    print(f"\nModel created:")
-    print(f"  Hidden channels: {hidden_channels}")
-    print(f"  Number of layers: {num_layers}")
-    print(f"  Output classes: {num_classes}")
-    print(f"  Dropout: {dropout}")
-    print(f"  Target node type: {target_node_type}")
+    logger.info("Model created:")
+    logger.info(f"  Hidden channels: {hidden_channels}")
+    logger.info(f"  Number of layers: {num_layers}")
+    logger.info(f"  Output classes: {num_classes}")
+    logger.debug(f"  Dropout: {dropout}")
+    logger.debug(f"  Target node type: {target_node_type}")
     
     # Count parameters
-    total_params = sum(p.numel() for p in model.parameters())
-    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"  Total parameters: {total_params:,}")
-    print(f"  Trainable parameters: {trainable_params:,}")
+    # total_params = sum(p.numel() for p in model.parameters())
+    # trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    # logger.debug(f"  Total parameters: {total_params:,}")
+    # logger.debug(f"  Trainable parameters: {trainable_params:,}")
     
     return model
