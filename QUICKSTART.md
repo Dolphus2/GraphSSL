@@ -1,35 +1,42 @@
 # Quick Start Guide - GraphSSL Supervised Learning
 
-## Installation (HPC with UV)
+**Important:** All commands should be run from the GraphSSL root directory.
 
+## Installation
+
+### Option 1: Editable Install (Recommended for Development)
 ```bash
-# Install PyTorch Geometric dependencies
-python -m pip install pyg-lib -f https://data.pyg.org/whl/torch-2.9.0+cu126.html
-python -m pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.8.0+cu126.html
+# Install the package in editable mode
+python -m pip install -e .
+
+# Or with optional dependencies
+python -m pip install -e ".[dev,notebook]"
+```
+
+### Option 2: Install from requirements.txt
+```bash
+# Install dependencies only (not as a package)
+python -m pip install -r requirements.txt
 ```
 
 ## Test Setup
 
 ```bash
-cd src
-python test_pipeline.py
+python -m graphssl.test_pipeline
 ```
 
 ## Run Pipeline
 
-### Local Test (10 epochs)
+### Using installed command
 ```bash
-python GraphSSL.py --epochs 10
-```
+# Quick test
+graphssl --epochs 10
 
-### Full Training
-```bash
-python GraphSSL.py
-```
+# Full training
+graphssl
 
-### With Custom Parameters
-```bash
-python GraphSSL.py \
+# With custom parameters
+graphssl \
     --hidden_channels 256 \
     --num_layers 3 \
     --batch_size 512 \
@@ -37,11 +44,16 @@ python GraphSSL.py \
     --extract_embeddings
 ```
 
+### Using module syntax
+```bash
+python -m graphssl.main --epochs 10
+```
+
 ## Submit to HPC (DTU)
 
 ```bash
-# Edit run_hpc.sh if needed, then:
-bsub < run_hpc.sh
+# Edit src/graphssl/run_hpc.sh if needed, then submit from GraphSSL root:
+bsub < src/graphssl/run_hpc.sh
 
 # Check job status:
 bstat
@@ -62,17 +74,18 @@ tail -f logs/graphssl_<JOBID>.out
 | `--dropout` | 0.5 | Dropout rate |
 | `--patience` | 10 | Early stopping patience |
 | `--extract_embeddings` | False | Save embeddings |
+| `--log_level` | INFO | Logging verbosity |
 
 ## Check Results
 
 ```bash
 # View saved results
-ls -lh ../results/
+ls -lh results/
 
 # Load results in Python
 python
 >>> import torch
->>> results = torch.load("../results/model_supervised.pt")
+>>> results = torch.load("results/model_supervised.pt")
 >>> print(f"Test Accuracy: {results['test_acc']:.4f}")
 ```
 
@@ -80,24 +93,39 @@ python
 
 **Out of Memory?**
 ```bash
-python GraphSSL.py --batch_size 256 --hidden_channels 64
+graphssl --batch_size 256 --hidden_channels 64
 ```
 
 **Want faster training?**
 ```bash
-python GraphSSL.py --batch_size 2048 --num_workers 8
+graphssl --batch_size 2048 --num_workers 8
+```
+
+**Verbose logging for debugging?**
+```bash
+graphssl --log_level DEBUG
 ```
 
 **Need help?**
 ```bash
-python GraphSSL.py --help
+graphssl --help
 ```
 
 ## File Structure
 
 ```
-src/
-├── GraphSSL.py           # Main pipeline (RUN THIS)
+GraphSSL/                     # Root directory (run commands from here)
+├── src/
+│   └── graphssl/            # Main package
+│       ├── main.py          # Main pipeline
+│       ├── test_pipeline.py # Test setup
+│       ├── run_examples.sh  # Example configurations
+│       ├── run_hpc.sh       # HPC submission script
+│       └── utils/           # Utility modules
+├── data/                    # Dataset storage (auto-created)
+├── results/                 # Training outputs (auto-created)
+└── requirements.txt         # Dependencies
+```
 ├── test_pipeline.py      # Test setup
 ├── run_hpc.sh           # HPC submission script
 ├── utils/

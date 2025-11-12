@@ -22,7 +22,8 @@ class HomogeneousGraphSAGE(nn.Module):
         hidden_channels: int,
         out_channels: int,
         num_layers: int = 2,
-        dropout: float = 0.5
+        dropout: float = 0.5,
+        use_batchnorm: bool = True
     ):
         """
         Args:
@@ -31,11 +32,13 @@ class HomogeneousGraphSAGE(nn.Module):
             out_channels: Output dimension (number of classes)
             num_layers: Number of GraphSAGE layers
             dropout: Dropout rate
+            use_batchnorm: Whether to use batch normalization
         """
         super().__init__()
         
         self.num_layers = num_layers
-        self.dropout = dropout
+        self.use_batchnorm = use_batchnorm
+        self.dropout = nn.Dropout(p=dropout)
         
         # Create GraphSAGE layers
         self.convs = nn.ModuleList()
@@ -45,6 +48,12 @@ class HomogeneousGraphSAGE(nn.Module):
             self.convs.append(SAGEConv(hidden_channels, hidden_channels))
         
         self.convs.append(SAGEConv(hidden_channels, hidden_channels))
+        
+        # Create batch normalization layers
+        if self.use_batchnorm:
+            self.batch_norms = nn.ModuleList()
+            for _ in range(num_layers):
+                self.batch_norms.append(nn.BatchNorm1d(hidden_channels))
         
         # Final classifier
         self.lin = Linear(hidden_channels, out_channels)
@@ -63,9 +72,11 @@ class HomogeneousGraphSAGE(nn.Module):
         # Apply GraphSAGE layers
         for i, conv in enumerate(self.convs):
             x = conv(x, edge_index)
+            if self.use_batchnorm:
+                x = self.batch_norms[i](x)
             if i < len(self.convs) - 1:
                 x = F.relu(x)
-                x = F.dropout(x, p=self.dropout) # Is set in train and eval functions
+                x = self.dropout(x)
         
         # Store embeddings before classification
         embeddings = x
@@ -88,6 +99,7 @@ class HeteroGraphSAGE(nn.Module):
         out_channels: int = 349,  # Number of venues in OGB_MAG
         num_layers: int = 2,
         dropout: float = 0.5,
+        use_batchnorm: bool = True,
         target_node_type: str = "paper"
     ):
         """
@@ -97,6 +109,7 @@ class HeteroGraphSAGE(nn.Module):
             out_channels: Output dimension (number of classes)
             num_layers: Number of GraphSAGE layers
             dropout: Dropout rate
+            use_batchnorm: Whether to use batch normalization
             target_node_type: The node type to predict
         """
         super().__init__()
@@ -111,7 +124,8 @@ class HeteroGraphSAGE(nn.Module):
             hidden_channels=hidden_channels,
             out_channels=out_channels,
             num_layers=num_layers,
-            dropout=dropout
+            dropout=dropout,
+            use_batchnorm=use_batchnorm
         )
         
         # Convert to heterogeneous model
@@ -151,6 +165,7 @@ def create_model(
     hidden_channels: int = 128,
     num_layers: int = 2,
     dropout: float = 0.5,
+    use_batchnorm: bool = True,
     target_node_type: str = "paper"
 ) -> HeteroGraphSAGE:
     """
@@ -161,6 +176,7 @@ def create_model(
         hidden_channels: Hidden layer dimension
         num_layers: Number of GraphSAGE layers
         dropout: Dropout rate
+        use_batchnorm: Whether to use batch normalization
         target_node_type: The node type to predict
     
     Returns:
@@ -176,6 +192,7 @@ def create_model(
         out_channels=num_classes,
         num_layers=num_layers,
         dropout=dropout,
+        use_batchnorm=use_batchnorm,
         target_node_type=target_node_type
     )
     
@@ -184,6 +201,7 @@ def create_model(
     logger.info(f"  Number of layers: {num_layers}")
     logger.info(f"  Output classes: {num_classes}")
     logger.debug(f"  Dropout: {dropout}")
+    logger.debug(f"  Batch normalization: {use_batchnorm}")
     logger.debug(f"  Target node type: {target_node_type}")
     
     # Count parameters

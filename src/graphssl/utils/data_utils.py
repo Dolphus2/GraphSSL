@@ -77,11 +77,12 @@ def create_neighbor_loaders(
     data_inductive = to_inductive(data.clone(), target_node_type)
 
     # Inductive training loader - only sample from training nodes with test and val nodes removed
+    # Note: data_inductive already has only train nodes, so use its train_mask
     inductive_train_loader = NeighborLoader(
         data_inductive,
         num_neighbors=num_neighbors,
         batch_size=batch_size,
-        input_nodes=(target_node_type, data[target_node_type].train_mask),
+        input_nodes=(target_node_type, data_inductive[target_node_type].train_mask),
         num_workers=num_workers,
         shuffle=True,
     )

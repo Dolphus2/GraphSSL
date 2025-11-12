@@ -1,23 +1,21 @@
 """
 Quick test script to verify the pipeline works correctly
+Run with: python -m graphssl.test_pipeline
 """
 import sys
 import torch
 from pathlib import Path
+
+from graphssl.utils.data_utils import load_ogb_mag, create_neighbor_loaders, get_dataset_info
+from graphssl.utils.models import create_model, HeteroGraphSAGE
+from graphssl.utils.training_utils import train_epoch, evaluate, train_model
 
 print("Testing GraphSSL Pipeline Components")
 print("=" * 60)
 
 # Test imports
 print("\n1. Testing imports...")
-try:
-    from utils.data_utils import load_ogb_mag, create_neighbor_loaders, get_dataset_info, to_inductive
-    from utils.models import create_model, HeteroGraphSAGE
-    from utils.training_utils import train_epoch, evaluate, train_model
-    print("   ✓ All imports successful")
-except Exception as e:
-    print(f"   ✗ Import failed: {e}")
-    sys.exit(1)
+print("   ✓ All imports successful")
 
 # Test PyTorch Geometric
 print("\n2. Testing PyTorch Geometric...")
@@ -44,8 +42,8 @@ print("\n4. Dataset loading test...")
 # print("   To test dataset loading, uncomment the code in test_pipeline.py")
 # Uncomment below to test actual dataset loading:
 try:
-    assert Path.cwd().name == 'src'
-    data_path = Path("../data")
+    assert Path.cwd().name == 'GraphSSL'
+    data_path = Path("data")
     data_path.mkdir(parents=True, exist_ok=True)
     data = load_ogb_mag(str(data_path), preprocess="metapath2vec")
     print("   ✓ Dataset loaded successfully")
@@ -56,6 +54,6 @@ print("\n" + "=" * 60)
 print("Pipeline component test completed!")
 print("=" * 60)
 print("\nTo run the full pipeline:")
-print("  python GraphSSL.py")
+print("  python -m graphssl.main")
 print("\nFor help:")
-print("  python GraphSSL.py --help")
+print("  python -m graphssl.main --help")

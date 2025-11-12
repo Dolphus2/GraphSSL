@@ -43,13 +43,11 @@ def train_epoch(
         optimizer.zero_grad()
         
         # Forward pass
-        out, _ = model(batch.x_dict, batch.edge_index_dict)
+        out, _ = model(batch.x_dict, batch.edge_index_dict) # out is class logits because of final linear layer
         
         # Get target nodes (the ones in the current batch)
         batch_size = batch[target_node_type].batch_size
-        pred = out[target_node_type][:batch_size]
-        out = out[:batch_size]
-        # assert pred[0] == out[0]
+        out = out[:batch_size]  # Out has already been filtered in forward pass out[self.target_node_type]
         y = batch[target_node_type].y[:batch_size]
         
         # Compute loss
@@ -60,7 +58,7 @@ def train_epoch(
         optimizer.step()
         
         # Track metrics
-        total_loss += float(loss) * batch_size
+        total_loss += loss.item() * batch_size
         total_correct += int((out.argmax(dim=-1) == y).sum())
         total_examples += batch_size
     

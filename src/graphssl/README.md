@@ -5,35 +5,45 @@ This directory contains a complete supervised learning pipeline for venue predic
 ## Project Structure
 
 ```
-src/
-├── GraphSSL.py                 # Main pipeline script
-├── dataset_to_inductive.py     # Utility to convert dataset to inductive setting
-├── utils/
-│   ├── data_utils.py          # Dataset loading and data loader creation
-│   ├── models.py              # GraphSAGE model implementation
-│   ├── training_utils.py      # Training and evaluation functions
-│   └── loading_utils.py       # Additional loading utilities
+src/graphssl/
+├── __init__.py                # Package initialization
+├── main.py                    # Main pipeline script
+├── test_pipeline.py           # Test script to verify setup
+├── run_examples.sh            # Example run configurations
+├── run_hpc.sh                 # HPC submission script
+└── utils/
+    ├── __init__.py
+    ├── data_utils.py          # Dataset loading and data loader creation
+    ├── models.py              # GraphSAGE model implementation
+    └── training_utils.py      # Training and evaluation functions
 ```
 
 ## Installation
 
-Make sure you have the required dependencies installed. If using `uv` on HPC:
+Install the package in editable mode from the GraphSSL root directory:
 
 ```bash
-# Install PyTorch Geometric dependencies
-python -m pip install pyg-lib -f https://data.pyg.org/whl/torch-2.9.0+cu126.html
-python -m pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.8.0+cu126.html
+# Basic installation
+pip install -e .
+
+# With optional dependencies
+pip install -e ".[dev,notebook]"
 ```
 
 ## Usage
+
+**Important:** All commands should be run from the GraphSSL root directory.
 
 ### Basic Usage
 
 Run the complete supervised learning pipeline with default parameters:
 
 ```bash
-cd src
-python GraphSSL.py
+# Using the installed command
+graphssl
+
+# Or using module syntax
+python -m graphssl.main
 ```
 
 ### Advanced Usage
@@ -41,9 +51,9 @@ python GraphSSL.py
 Customize the pipeline with command-line arguments:
 
 ```bash
-python GraphSSL.py \
-    --data_root ../data \
-    --results_root ../results \
+graphssl \
+    --data_root data \
+    --results_root results \
     --hidden_channels 256 \
     --num_layers 3 \
     --batch_size 512 \
@@ -56,8 +66,8 @@ python GraphSSL.py \
 ### Command-Line Arguments
 
 #### Data Arguments
-- `--data_root`: Root directory for dataset storage (default: `../data`)
-- `--results_root`: Root directory for results (default: `../results`)
+- `--data_root`: Root directory for dataset storage (default: `data`)
+- `--results_root`: Root directory for results (default: `results`)
 - `--preprocess`: Preprocessing method for node embeddings (`metapath2vec` or `transe`, default: `metapath2vec`)
 - `--target_node`: Target node type for prediction (default: `paper`)
 
@@ -80,6 +90,7 @@ python GraphSSL.py \
 
 #### Additional Options
 - `--extract_embeddings`: Extract and save node embeddings after training
+- `--log_level`: Logging verbosity (DEBUG, INFO, WARNING, ERROR, CRITICAL, default: INFO)
 
 ## Pipeline Steps
 
@@ -117,7 +128,7 @@ GPU: NVIDIA A100-SXM4-40GB
 ================================================================================
 Step 1: Loading Dataset
 ================================================================================
-Loading OGB_MAG dataset from ../data
+Loading OGB_MAG dataset from data
 Using preprocessing method: metapath2vec
 
 Dataset loaded successfully!

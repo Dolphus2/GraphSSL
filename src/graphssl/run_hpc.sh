@@ -11,6 +11,7 @@
 #
 # LSF script for running GraphSSL supervised learning on DTU HPC
 # Adjust the parameters above according to your needs
+# Submit from GraphSSL root directory: bsub < src/graphssl/run_hpc.sh
 #
 
 echo "Starting GraphSSL Supervised Learning Pipeline"
@@ -29,15 +30,15 @@ echo ""
 
 # Create necessary directories
 mkdir -p logs
-mkdir -p ../data
-mkdir -p ../results
+mkdir -p data
+mkdir -p results
 
 # Set environment variables
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=4
 
-# Navigate to source directory
-cd /zhome/5c/0/167753/DTU/E2025/GraphSSL/src
+# Navigate to GraphSSL root directory
+cd /zhome/5c/0/167753/DTU/E2025/GraphSSL
 
 # Print GPU information
 echo "GPU Information:"
@@ -45,9 +46,9 @@ nvidia-smi
 echo ""
 
 # Run the supervised learning pipeline
-python main.py \
-    --data_root ../data \
-    --results_root ../results/hpc_run_$(date +%Y%m%d_%H%M%S) \
+python -m graphssl.main \
+    --data_root data \
+    --results_root results/hpc_run_$(date +%Y%m%d_%H%M%S) \
     --hidden_channels 128 \
     --num_layers 2 \
     --batch_size 1024 \

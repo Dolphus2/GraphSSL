@@ -1,23 +1,22 @@
 """
 GraphSSL: Supervised Learning Pipeline for OGB_MAG Dataset
 Venue prediction using heterogeneous GraphSAGE
+
+Run with: python -m graphssl.main
 """
-import os
 import logging
 import torch
 import argparse
 from pathlib import Path
 
-# Import utilities
-from utils.data_utils import load_ogb_mag, create_neighbor_loaders, get_dataset_info, to_inductive
-from utils.models import create_model
-from utils.training_utils import train_model, test_model, extract_embeddings
+from graphssl.utils.data_utils import load_ogb_mag, create_neighbor_loaders, get_dataset_info
+from graphssl.utils.models import create_model
+from graphssl.utils.training_utils import train_model, test_model, extract_embeddings
 
-# Set up logging
 logger = logging.getLogger(__name__)
 
 
-def main(args):
+def run_pipeline(args):
     """
     Main supervised learning pipeline for venue prediction on OGB_MAG.
     """
@@ -82,6 +81,7 @@ def main(args):
         hidden_channels=args.hidden_channels,
         num_layers=args.num_layers,
         dropout=args.dropout,
+        use_batchnorm=args.use_batchnorm,
         target_node_type=args.target_node
     )
     model = model.to(device)
@@ -203,7 +203,8 @@ def main(args):
     print("="*80)
 
 
-if __name__ == "__main__":
+def cli():
+    """Command-line interface for the GraphSSL pipeline."""
     parser = argparse.ArgumentParser(
         description="Supervised Learning Pipeline for OGB_MAG Venue Prediction"
     )
@@ -212,13 +213,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--data_root",
         type=str,
-        default="../data",
+        default="data",
         help="Root directory for dataset storage"
     )
     parser.add_argument(
         "--results_root",
         type=str,
-        default="../results",
+        default="results",
         help="Root directory for results"
     )
     parser.add_argument(
@@ -253,6 +254,13 @@ if __name__ == "__main__":
         type=float,
         default=0.5,
         help="Dropout rate"
+    )
+    parser.add_argument(
+        "--no_batchnorm",
+        action="store_false",
+        dest="use_batchnorm",
+        default=True,
+        help="Disable batch normalization"
     )
     
     # Data loader arguments
@@ -332,4 +340,13 @@ if __name__ == "__main__":
     )
     
     # Run pipeline
-    main(args)
+    run_pipeline(args)
+
+
+def main():
+    """Entry point for the graphssl command."""
+    cli()
+
+
+if __name__ == "__main__":
+    cli()
