@@ -1,3 +1,6 @@
+Pytorch 2.9.0 CUDA 12.6
+pip install pyg-lib -f https://data.pyg.org/whl/torch-2.9.0+cu126.html
+pip install torch-scatter torch-sparse -f https://data.pyg.org/whl/torch-2.8.0+${12.6}.html
 TODO: 
  - Get on HPC and get comfortable. 
  - Implement supervised model on OGBN-MAG
