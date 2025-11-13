@@ -103,6 +103,12 @@ def run_pipeline(args):
     print("Step 5: Training Model")
     print("="*80)
     
+    # Create checkpoint directory
+    results_path = Path(args.results_root)
+    results_path.mkdir(parents=True, exist_ok=True)
+    checkpoint_dir = results_path / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    
     history = train_model(
         model=model,
         train_loader=inductive_train_loader,
@@ -112,6 +118,7 @@ def run_pipeline(args):
         num_epochs=args.epochs,
         target_node_type=args.target_node,
         early_stopping_patience=args.patience,
+        checkpoint_dir=str(checkpoint_dir),
         verbose=True
     )
     
@@ -132,10 +139,9 @@ def run_pipeline(args):
     print("Step 7: Saving Results")
     print("="*80)
     
-    results_path = Path(args.results_root)
-    results_path.mkdir(parents=True, exist_ok=True)
+    # Results path was already created in Step 5
     
-    # Save model
+    # Save final model with complete training information
     model_path = results_path / "model_supervised.pt"
     torch.save({
         'model_state_dict': model.state_dict(),
@@ -145,7 +151,9 @@ def run_pipeline(args):
         'args': vars(args),
         'history': history
     }, model_path)
-    logger.info(f"Model saved to: {model_path}")
+    logger.info(f"Final model saved to: {model_path}")
+    logger.info(f"Best model checkpoint saved to: {checkpoint_dir / 'best_model.pt'}")
+    logger.info(f"Last checkpoint saved to: {checkpoint_dir / 'last_checkpoint.pt'}")
     
     # Save training history
     history_path = results_path / "training_history.pt"

@@ -52,12 +52,12 @@ echo ""
 # Run the supervised learning pipeline
 python -m graphssl.main \
     --data_root data \
-    --results_root results/hpc_run_$(date +%Y%m%d_%H%M%S) \
+    --results_root results/hpc_run_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
     --hidden_channels 128 \
     --num_layers 2 \
     --batch_size 1024 \
     --num_neighbors 15 10 \
-    --epochs 100 \
+    --epochs 1000 \
     --lr 0.001 \
     --dropout 0.5 \
     --patience 10 \

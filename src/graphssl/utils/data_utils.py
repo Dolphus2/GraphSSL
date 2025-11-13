@@ -54,7 +54,7 @@ def create_neighbor_loaders(
     batch_size: int = 1024,
     num_workers: int = 4,
     target_node_type: str = "paper"
-) -> Tuple[NeighborLoader, NeighborLoader, NeighborLoader]:
+) -> Tuple[NeighborLoader, NeighborLoader, NeighborLoader, NeighborLoader]:
     """
     Create train, validation, and test NeighborLoaders for heterogeneous graphs.
     

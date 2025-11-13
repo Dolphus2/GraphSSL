@@ -5,9 +5,10 @@ import logging
 import torch
 import torch.nn.functional as F
 from torch_geometric.loader import NeighborLoader
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 import time
 from tqdm import tqdm
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,7 @@ def train_model(
     num_epochs: int = 100,
     target_node_type: str = "paper",
     early_stopping_patience: int = 10,
+    checkpoint_dir: Optional[str] = None,
     verbose: bool = True
 ) -> Dict:
     """
@@ -135,11 +137,18 @@ def train_model(
         num_epochs: Maximum number of epochs
         target_node_type: Target node type for prediction
         early_stopping_patience: Patience for early stopping
+        checkpoint_dir: Directory to save model checkpoints (if None, saves to current directory)
         verbose: Whether to print progress
     
     Returns:
         Dictionary containing training history
     """
+    
+    # Setup checkpoint directory
+    if checkpoint_dir is not None:
+        best_model_path = Path(checkpoint_dir) / "best_model.pt"
+    else:
+        best_model_path = "best_model.pt"
     history = {
         "train_loss": [],
         "train_acc": [],
@@ -183,13 +192,23 @@ def train_model(
                   f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | "
                   f"Time: {epoch_time:.2f}s")
         
-        # Early stopping
+        # Early stopping and checkpointing
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             best_epoch = epoch
             patience_counter = 0
-            # Save best model
-            torch.save(model.state_dict(), "best_model.pt")
+            # Save best model checkpoint
+            checkpoint = {
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_acc': val_acc,
+                'val_loss': val_loss,
+                'train_acc': train_acc,
+                'train_loss': train_loss,
+            }
+            torch.save(checkpoint, best_model_path)
+            logger.debug(f"Saved best model checkpoint to {best_model_path}")
         else:
             patience_counter += 1
         
@@ -199,7 +218,8 @@ def train_model(
             break
     
     # Load best model
-    model.load_state_dict(torch.load("best_model.pt"))
+    checkpoint = torch.load(best_model_path, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
     
     logger.info(f"Training completed!")
     logger.info(f"Best validation accuracy: {best_val_acc:.4f} at epoch {best_epoch}")
