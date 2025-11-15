@@ -7,6 +7,7 @@ Run with: python -m graphssl.main
 import logging
 import torch
 import argparse
+import wandb
 from pathlib import Path
 
 from graphssl.utils.data_utils import load_ogb_mag, create_neighbor_loaders, get_dataset_info
@@ -82,7 +83,9 @@ def run_pipeline(args):
         num_layers=args.num_layers,
         dropout=args.dropout,
         use_batchnorm=args.use_batchnorm,
-        target_node_type=args.target_node
+        target_node_type=args.target_node,
+        aggr=args.aggr,
+        aggr_rel=args.aggr_rel
     )
     model = model.to(device)
     
@@ -116,6 +119,7 @@ def run_pipeline(args):
         optimizer=optimizer,
         device=device,
         num_epochs=args.epochs,
+        log_interval=args.log_interval,
         target_node_type=args.target_node,
         early_stopping_patience=args.patience,
         checkpoint_dir=str(checkpoint_dir),
@@ -258,6 +262,20 @@ def cli():
         help="Number of GraphSAGE layers"
     )
     parser.add_argument(
+        "--aggr",
+        type=str,
+        default="sum",
+        choices=["mean", "sum", "max"],
+        help="Aggregator inside SAGEConv"
+    )
+    parser.add_argument(
+        "--aggr_rel",
+        type=str,
+        default="sum",
+        choices=["sum", "mean", "max"],
+        help="Aggregator for all relations"
+    )
+    parser.add_argument(
         "--dropout",
         type=float,
         default=0.5,
@@ -326,6 +344,12 @@ def cli():
     
     # Additional options
     parser.add_argument(
+        "--log_interval",
+        type=int,
+        default=20,
+        help="Log metrics for each interval"
+    )    
+    parser.add_argument(
         "--extract_embeddings",
         action="store_true",
         help="Extract and save node embeddings after training"
@@ -345,6 +369,24 @@ def cli():
         level=getattr(logging, args.log_level),
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
         datefmt='%Y-%m-%d %H:%M:%S'
+    )
+
+    wandb.init(
+        project="graphssl",
+        config={
+            "hidden_channels": args.hidden_channels,
+            "num_layers": args.num_layers,
+            "dropout": args.dropout,
+            "num_neighbors": args.num_neighbors,
+            "lr": args.lr,
+            "weight_decay": args.weight_decay,
+            "batch_size": args.batch_size,
+            "epochs": args.epochs,
+            "log_interval": args.log_interval,
+            "patience": args.patience,
+            "aggr": args.aggr,
+            "aggr_rel": args.aggr_rel,
+        }
     )
     
     # Run pipeline

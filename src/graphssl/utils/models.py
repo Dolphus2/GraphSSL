@@ -23,7 +23,8 @@ class HomogeneousGraphSAGE(nn.Module):
         out_channels: int,
         num_layers: int = 2,
         dropout: float = 0.5,
-        use_batchnorm: bool = True
+        use_batchnorm: bool = True,
+        aggr: str = "mean",
     ):
         """
         Args:
@@ -42,12 +43,12 @@ class HomogeneousGraphSAGE(nn.Module):
         
         # Create GraphSAGE layers
         self.convs = nn.ModuleList()
-        self.convs.append(SAGEConv(in_channels, hidden_channels))
+        self.convs.append(SAGEConv(in_channels, hidden_channels, aggr=aggr))
         
         for _ in range(num_layers - 2):
-            self.convs.append(SAGEConv(hidden_channels, hidden_channels))
+            self.convs.append(SAGEConv(hidden_channels, hidden_channels, aggr=aggr))
         
-        self.convs.append(SAGEConv(hidden_channels, hidden_channels))
+        self.convs.append(SAGEConv(hidden_channels, hidden_channels, aggr=aggr))
         
         # Create batch normalization layers
         if self.use_batchnorm:
@@ -100,7 +101,9 @@ class HeteroGraphSAGE(nn.Module):
         num_layers: int = 2,
         dropout: float = 0.5,
         use_batchnorm: bool = True,
-        target_node_type: str = "paper"
+        target_node_type: str = "paper",
+        aggr: str = "mean",
+        aggr_rel: str = "sum"
     ):
         """
         Args:
@@ -125,11 +128,12 @@ class HeteroGraphSAGE(nn.Module):
             out_channels=out_channels,
             num_layers=num_layers,
             dropout=dropout,
-            use_batchnorm=use_batchnorm
+            use_batchnorm=use_batchnorm,
+            aggr=aggr
         )
         
         # Convert to heterogeneous model
-        self.model = to_hetero(self.model, metadata, aggr='mean')
+        self.model = to_hetero(self.model, metadata, aggr=aggr_rel)
     
     def forward(self, x_dict, edge_index_dict):
         """
@@ -166,7 +170,9 @@ def create_model(
     num_layers: int = 2,
     dropout: float = 0.5,
     use_batchnorm: bool = True,
-    target_node_type: str = "paper"
+    target_node_type: str = "paper",
+    aggr: str = "mean",
+    aggr_rel: str = "sum"
 ) -> HeteroGraphSAGE:
     """
     Create a heterogeneous GraphSAGE model.
@@ -193,7 +199,9 @@ def create_model(
         num_layers=num_layers,
         dropout=dropout,
         use_batchnorm=use_batchnorm,
-        target_node_type=target_node_type
+        target_node_type=target_node_type,
+        aggr=aggr,
+        aggr_rel=aggr_rel
     )
     
     logger.info("Model created:")

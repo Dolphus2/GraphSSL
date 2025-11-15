@@ -222,3 +222,4 @@ results/**/*.pt
 .venv_python/
 .venv*/
 logs/
+wandb/
