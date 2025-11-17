@@ -62,6 +62,10 @@ python -m graphssl.main \
     --dropout 0.5 \
     --patience 10 \
     --num_workers 4 \
+    --weight_decay 0.0005 \
+    --aggr "mean" \
+    --aggr_rel "sum" \
+    --log_interval 20 \
     --extract_embeddings \
     --seed 42
 

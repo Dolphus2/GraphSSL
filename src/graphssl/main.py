@@ -8,6 +8,7 @@ import logging
 import torch
 import argparse
 import wandb
+import time
 from pathlib import Path
 
 from graphssl.utils.data_utils import load_ogb_mag, create_neighbor_loaders, get_dataset_info
@@ -264,7 +265,7 @@ def cli():
     parser.add_argument(
         "--aggr",
         type=str,
-        default="sum",
+        default="mean",
         choices=["mean", "sum", "max"],
         help="Aggregator inside SAGEConv"
     )
@@ -373,6 +374,7 @@ def cli():
 
     wandb.init(
         project="graphssl",
+        name=f"graphssl_{int(time.time())}",
         config={
             "hidden_channels": args.hidden_channels,
             "num_layers": args.num_layers,
