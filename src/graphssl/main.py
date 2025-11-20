@@ -9,9 +9,9 @@ import torch
 import argparse
 from pathlib import Path
 
-from graphssl.utils.data_utils import load_ogb_mag, create_neighbor_loaders, get_dataset_info
-from graphssl.utils.models import create_model
-from graphssl.utils.training_utils import train_model, test_model, extract_embeddings
+from utils.data_utils import load_ogb_mag, create_neighbor_loaders, get_dataset_info
+from utils.models import create_model
+from utils.training_utils import train_model, test_model, extract_embeddings
 
 logger = logging.getLogger(__name__)
 

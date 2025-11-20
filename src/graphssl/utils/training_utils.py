@@ -1,299 +1,239 @@
 """
-Training and evaluation utilities for graph neural networks
+Data loading utilities for OGB_MAG dataset
 """
+import os
 import logging
 import torch
-import torch.nn.functional as F
+import torch_geometric.transforms as T
+from torch_geometric.datasets import OGB_MAG
 from torch_geometric.loader import NeighborLoader
-from typing import Dict, Tuple, Optional
-import time
-from tqdm import tqdm
-from pathlib import Path
-
+from torch_geometric.data import HeteroData
+from typing import Tuple, Dict
+import tqdm
 logger = logging.getLogger(__name__)
 
 
-def train_epoch(
-    model: torch.nn.Module,
-    loader: NeighborLoader,
-    optimizer: torch.optim.Optimizer,
-    device: torch.device,
-    target_node_type: str = "paper"
-) -> Tuple[float, float]:
-    """
-    Train the model for one epoch.
-    
-    Args:
-        model: The model to train
-        loader: Training data loader
-        optimizer: Optimizer
-        device: Device to train on
-        target_node_type: Target node type for prediction
-    
-    Returns:
-        Tuple of (average loss, accuracy)
-    """
+# 在 training_utils.py 中添加
+def train_link_epoch(model, loader, optimizer, device, target_edge_type):
     model.train()
-    
     total_loss = 0
-    total_correct = 0
-    total_examples = 0
-    
-    for batch in tqdm(loader, desc="Training", leave=False):
+
+    for batch in tqdm(loader, desc="Training Link Pred"):
         batch = batch.to(device)
         optimizer.zero_grad()
-        
-        # Forward pass
-        out, _ = model(batch.x_dict, batch.edge_index_dict) # out is class logits because of final linear layer
-        
-        # Get target nodes (the ones in the current batch)
-        batch_size = batch[target_node_type].batch_size
-        out = out[:batch_size]  # Out has already been filtered in forward pass out[self.target_node_type]
-        y = batch[target_node_type].y[:batch_size]
-        
-        # Compute loss
-        loss = F.cross_entropy(out, y)
-        
-        # Backward pass
+
+        # batch.edge_label_index 包含了正样本和随机采样的负样本
+        # batch.edge_label 是 0 或 1
+
+        # 前向传播
+        pred_scores = model(
+            batch.x_dict,
+            batch.edge_index_dict,
+            batch.edge_label_index,
+            target_edge_type
+        )
+
+        # 计算损失
+        loss = F.binary_cross_entropy_with_logits(pred_scores, batch.edge_label)
+
         loss.backward()
         optimizer.step()
-        
-        # Track metrics
-        total_loss += loss.item() * batch_size
-        total_correct += int((out.argmax(dim=-1) == y).sum())
-        total_examples += batch_size
-    
-    return total_loss / total_examples, total_correct / total_examples
+        total_loss += loss.item()
+
+    return total_loss
+def load_ogb_mag(root_path: str, preprocess: str = "metapath2vec") -> HeteroData:
+    """
+    Load the OGB_MAG dataset.
+
+    Args:
+        root_path: Path to save the dataset
+        preprocess: Preprocessing method for node embeddings ("metapath2vec" or "transe")
+
+    Returns:
+        HeteroData object containing the graph
+    """
+    logger.info(f"Loading OGB_MAG dataset from {root_path}")
+    logger.info(f"Using preprocessing method: {preprocess}")
+
+    # Load dataset with preprocessing
+    transform = T.ToUndirected(merge=True)
+    dataset = OGB_MAG(root=root_path, preprocess=preprocess, transform=transform)
+    data = dataset[0]
+
+    logger.info("Dataset loaded successfully!")
+    logger.debug(f"Node types: {data.node_types}")
+    logger.debug(f"Edge types: {data.edge_types}")
+
+    # Log statistics for paper nodes (target)
+    logger.info("Paper node statistics:")
+    logger.info(f"  Number of papers: {data['paper'].num_nodes}")
+    logger.info(f"  Feature dimension: {data['paper'].x.shape[1]}")
+    logger.info(f"  Number of venues (classes): {data['paper'].y.max().item() + 1}")
+    logger.debug(f"  Train samples: {data['paper'].train_mask.sum().item()}")
+    logger.debug(f"  Val samples: {data['paper'].val_mask.sum().item()}")
+    logger.debug(f"  Test samples: {data['paper'].test_mask.sum().item()}")
+
+    return data
 
 
-@torch.no_grad()
-def evaluate(
-    model: torch.nn.Module,
-    loader: NeighborLoader,
-    device: torch.device,
+def create_neighbor_loaders(
+    data: HeteroData,
+    num_neighbors: list = [15, 10],
+    batch_size: int = 1024,
+    num_workers: int = 4,
     target_node_type: str = "paper"
-) -> Tuple[float, float]:
+) -> Tuple[NeighborLoader, NeighborLoader, NeighborLoader, NeighborLoader]:
     """
-    Evaluate the model.
-    
+    Create train, validation, and test NeighborLoaders for heterogeneous graphs.
+
     Args:
-        model: The model to evaluate
-        loader: Data loader (validation or test)
-        device: Device to evaluate on
-        target_node_type: Target node type for prediction
-    
+        data: HeteroData object
+        num_neighbors: Number of neighbors to sample at each layer [layer1, layer2, ...]
+        batch_size: Batch size for loading
+        num_workers: Number of worker processes for data loading
+        target_node_type: The node type we're making predictions for
+
     Returns:
-        Tuple of (average loss, accuracy)
+        Tuple of (train_loader, val_loader, test_loader)
     """
-    model.eval()
-    
-    total_loss = 0
-    total_correct = 0
-    total_examples = 0
-    
-    for batch in tqdm(loader, desc="Evaluating", leave=False):
-        batch = batch.to(device)
-        
-        # Forward pass
-        out, _ = model(batch.x_dict, batch.edge_index_dict)
-        
-        # Get target nodes
-        batch_size = batch[target_node_type].batch_size
-        out = out[:batch_size]
-        y = batch[target_node_type].y[:batch_size]
-        
-        # Compute loss
-        loss = F.cross_entropy(out, y)
-        
-        # Track metrics
-        total_loss += float(loss) * batch_size
-        total_correct += int((out.argmax(dim=-1) == y).sum())
-        total_examples += batch_size
-    
-    return total_loss / total_examples, total_correct / total_examples
+    logger.debug(f"Creating NeighborLoaders with:")
+    logger.debug(f"  Neighbors per layer: {num_neighbors}")
+    logger.debug(f"  Batch size: {batch_size}")
+    logger.debug(f"  Target node type: {target_node_type}")
+
+    # Create inductive train dataset
+    data_inductive = to_inductive(data.clone(), target_node_type)
+
+    # Inductive training loader - only sample from training nodes with test and val nodes removed
+    # Note: data_inductive already has only train nodes, so use its train_mask
+    inductive_train_loader = NeighborLoader(
+        data_inductive,
+        num_neighbors=num_neighbors,
+        batch_size=batch_size,
+        input_nodes=(target_node_type, data_inductive[target_node_type].train_mask),
+        num_workers=num_workers,
+        shuffle=True,
+    )
+
+    # Transductive training loader - only sample from training nodes
+    transductive_train_loader = NeighborLoader(
+        data,
+        num_neighbors=num_neighbors,
+        batch_size=batch_size,
+        input_nodes=(target_node_type, data[target_node_type].train_mask),
+        num_workers=num_workers,
+        shuffle=True,
+    )
+
+    # Validation loader
+    val_loader = NeighborLoader(
+        data,
+        num_neighbors=num_neighbors,
+        batch_size=batch_size,
+        input_nodes=(target_node_type, data[target_node_type].val_mask),
+        num_workers=num_workers,
+        shuffle=False,
+    )
+
+    # Test loader
+    test_loader = NeighborLoader(
+        data,
+        num_neighbors=num_neighbors,
+        batch_size=batch_size,
+        input_nodes=(target_node_type, data[target_node_type].test_mask),
+        num_workers=num_workers,
+        shuffle=False,
+    )
+
+    logger.info("Loaders created successfully!")
+    logger.debug(f"  Inductive Train batches: ~{len(inductive_train_loader)}")
+    logger.debug(f"  Train batches: ~{len(transductive_train_loader)}")
+    logger.debug(f"  Val batches: ~{len(val_loader)}")
+    logger.debug(f"  Test batches: ~{len(test_loader)}")
+
+    return inductive_train_loader, transductive_train_loader, val_loader, test_loader
 
 
-def train_model(
-    model: torch.nn.Module,
-    train_loader: NeighborLoader,
-    val_loader: NeighborLoader,
-    optimizer: torch.optim.Optimizer,
-    device: torch.device,
-    num_epochs: int = 100,
-    target_node_type: str = "paper",
-    early_stopping_patience: int = 10,
-    checkpoint_dir: Optional[str] = None,
-    verbose: bool = True
-) -> Dict:
+def get_dataset_info(data: HeteroData, target_node_type: str = "paper") -> Dict:
     """
-    Train the model with early stopping.
-    
+    Extract key information from the dataset.
+
     Args:
-        model: The model to train
-        train_loader: Training data loader
-        val_loader: Validation data loader
-        optimizer: Optimizer
-        device: Device to train on
-        num_epochs: Maximum number of epochs
-        target_node_type: Target node type for prediction
-        early_stopping_patience: Patience for early stopping
-        checkpoint_dir: Directory to save model checkpoints (if None, saves to current directory)
-        verbose: Whether to print progress
-    
+        data: HeteroData object
+        target_node_type: The node type we're making predictions for
+
     Returns:
-        Dictionary containing training history
+        Dictionary containing dataset information
     """
-    
-    # Setup checkpoint directory
-    if checkpoint_dir is not None:
-        best_model_path = Path(checkpoint_dir) / "best_model.pt"
-    else:
-        best_model_path = "best_model.pt"
-    history = {
-        "train_loss": [],
-        "train_acc": [],
-        "val_loss": [],
-        "val_acc": [],
-        "epoch_time": []
+    info = {
+        "node_types": data.node_types,
+        "edge_types": data.edge_types,
+        "num_classes": int(data[target_node_type].y.max().item() + 1),
+        "num_features": {},
+        "num_nodes": {},
     }
-    
-    best_val_acc = 0
-    best_epoch = 0
-    patience_counter = 0
-    
-    logger.info(f"Starting training for {num_epochs} epochs")
-    
-    for epoch in range(1, num_epochs + 1):
-        start_time = time.time()
-        
-        # Train
-        train_loss, train_acc = train_epoch(
-            model, train_loader, optimizer, device, target_node_type
-        )
-        
-        # Validate
-        val_loss, val_acc = evaluate(
-            model, val_loader, device, target_node_type
-        )
-        
-        epoch_time = time.time() - start_time
-        
-        # Store metrics
-        history["train_loss"].append(train_loss)
-        history["train_acc"].append(train_acc)
-        history["val_loss"].append(val_loss)
-        history["val_acc"].append(val_acc)
-        history["epoch_time"].append(epoch_time)
-        
-        # Print progress
-        if verbose:
-            print(f"Epoch {epoch:3d}/{num_epochs} | "
-                  f"Train Loss: {train_loss:.4f} | Train Acc: {train_acc:.4f} | "
-                  f"Val Loss: {val_loss:.4f} | Val Acc: {val_acc:.4f} | "
-                  f"Time: {epoch_time:.2f}s")
-        
-        # Early stopping and checkpointing
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            best_epoch = epoch
-            patience_counter = 0
-            # Save best model checkpoint
-            checkpoint = {
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_acc': val_acc,
-                'val_loss': val_loss,
-                'train_acc': train_acc,
-                'train_loss': train_loss,
-            }
-            torch.save(checkpoint, best_model_path)
-            logger.debug(f"Saved best model checkpoint to {best_model_path}")
-        else:
-            patience_counter += 1
-        
-        if patience_counter >= early_stopping_patience:
-            logger.info(f"Early stopping triggered at epoch {epoch}")
-            logger.info(f"Best validation accuracy: {best_val_acc:.4f} at epoch {best_epoch}")
-            break
-    
-    # Load best model
-    checkpoint = torch.load(best_model_path, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
-    
-    logger.info(f"Training completed!")
-    logger.info(f"Best validation accuracy: {best_val_acc:.4f} at epoch {best_epoch}")
-    
-    return history
 
+    # Get feature dimensions for each node type
+    for node_type in data.node_types:
+        if hasattr(data[node_type], 'x') and data[node_type].x is not None:
+            info["num_features"][node_type] = data[node_type].x.shape[1]
+        info["num_nodes"][node_type] = data[node_type].num_nodes
 
-def test_model(
-    model: torch.nn.Module,
-    test_loader: NeighborLoader,
-    device: torch.device,
-    target_node_type: str = "paper"
-) -> Tuple[float, float]:
-    """
-    Test the model on the test set.
-    
-    Args:
-        model: The trained model
-        test_loader: Test data loader
-        device: Device to evaluate on
-        target_node_type: Target node type for prediction
-    
-    Returns:
-        Tuple of (test loss, test accuracy)
-    """
-    logger.info("Testing model on test set...")
-    
-    test_loss, test_acc = evaluate(model, test_loader, device, target_node_type)
-    
-    logger.info(f"Test Loss: {test_loss:.4f}")
-    logger.info(f"Test Accuracy: {test_acc:.4f}")
-    
-    return test_loss, test_acc
+    return info
 
+def to_inductive(data: HeteroData, node_type: str) -> HeteroData:
+    """
+    A function that removes all val/test node features and edges between train nodes and val/test nodes.
 
-@torch.no_grad()
-def extract_embeddings(
-    model: torch.nn.Module,
-    loader: NeighborLoader,
-    device: torch.device,
-    target_node_type: str = "paper"
-) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Extract node embeddings from the trained model.
-    
-    Args:
-        model: The trained model
-        loader: Data loader
-        device: Device to evaluate on
-        target_node_type: Target node type for prediction
-    
-    Returns:
-        Tuple of (embeddings, labels)
-    """
-    model.eval()
-    
-    embeddings_list = []
-    labels_list = []
-    
-    for batch in tqdm(loader, desc="Extracting embeddings", leave=False):
-        batch = batch.to(device)
-        
-        # Forward pass
-        _, embeddings = model(batch.x_dict, batch.edge_index_dict)
-        
-        # Get target nodes
-        batch_size = batch[target_node_type].batch_size
-        embeddings = embeddings[:batch_size]
-        y = batch[target_node_type].y[:batch_size]
-        
-        embeddings_list.append(embeddings.cpu())
-        labels_list.append(y.cpu())
-    
-    embeddings = torch.cat(embeddings_list, dim=0)
-    labels = torch.cat(labels_list, dim=0)
-    
-    return embeddings, labels
+    train_mask = data[node_type].train_mask
+    train_mask_idxs = torch.where(train_mask)[0]
+    N_train = len(train_mask_idxs)
+
+    # define new edge index
+    new_paper_idxs = torch.full((len(train_mask),), -1, device=train_mask.device)
+    new_paper_idxs[train_mask] = torch.arange(N_train, device=train_mask.device)
+
+    # restrict node_type to only include train split
+    data[node_type].x = data[node_type].x[train_mask]
+    data[node_type].y = data[node_type].y[train_mask]
+    data[node_type].year = data[node_type].year[train_mask]
+    data[node_type].train_mask = torch.ones((N_train), dtype=torch.bool, device=train_mask.device)
+    data[node_type].val_mask = torch.zeros((N_train), dtype=torch.bool, device=train_mask.device)
+    data[node_type].test_mask = torch.zeros((N_train), dtype=torch.bool, device=train_mask.device)
+    # From here there is no way to recover the val and test sets. Indexes have been reset.
+    # This is not necessary. val_mask and test_mask could have been adjusted accordingly.
+
+    # find edges with node_type as either source or destination
+    edge_types = list(data.edge_index_dict.keys())
+    edge_type_mask = [(e[0] == node_type, e[-1] == node_type) for e in edge_types]
+
+    edge_index_dict = data.edge_index_dict
+
+    for i, edge_type in enumerate(edge_types):
+        if not any(edge_type_mask[i]):
+            continue
+
+        edge_index = edge_index_dict[edge_type]
+        src_mask = torch.ones((edge_index.size(1)), dtype=bool)
+        dst_mask = torch.ones((edge_index.size(1)), dtype=bool)
+
+        # mask paper nodes in edge index not part of train
+        if edge_type[0] == node_type:
+            src_mask = new_paper_idxs[edge_index[0]] != -1
+
+        if edge_type[-1] == node_type:
+            dst_mask = new_paper_idxs[edge_index[1]] != -1
+
+        edge_mask = src_mask & dst_mask
+        filtered_edge_index = edge_index[:, edge_mask]
+
+        if edge_type[0] == node_type:
+            filtered_edge_index[0] = new_paper_idxs[filtered_edge_index[0]]
+
+        if edge_type[-1] == node_type:
+            filtered_edge_index[1] = new_paper_idxs[filtered_edge_index[1]]
+
+        data[edge_type]['edge_index'] = filtered_edge_index
+
+    return data

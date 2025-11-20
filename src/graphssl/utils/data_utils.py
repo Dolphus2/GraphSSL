@@ -12,7 +12,34 @@ from typing import Tuple, Dict
 
 logger = logging.getLogger(__name__)
 
+# 在 data_utils.py 中添加
+from torch_geometric.loader import LinkNeighborLoader
 
+
+def create_link_prediction_loaders(
+        data,
+        target_edge_type: tuple,  # 例如 ("author", "writes", "paper")
+        num_neighbors: list = [15, 10],
+        batch_size: int = 1024,
+        num_workers: int = 4
+):
+    # 1. 训练集加载器：使用 LinkNeighborLoader
+    # 它会自动生成负样本 (neg_sampling_ratio)
+    train_loader = LinkNeighborLoader(
+        data,
+        num_neighbors=num_neighbors,
+        edge_label_index=(target_edge_type, data[target_edge_type].edge_index),
+        edge_label=torch.ones(data[target_edge_type].num_edges),  # 正样本标签为1
+        neg_sampling_ratio=1.0,  # 1:1 正负样本比例
+        shuffle=True,
+        batch_size=batch_size,
+        num_workers=num_workers
+    )
+
+    # 注意：验证集和测试集通常也需要 LinkNeighborLoader 来评估边预测性能
+    # 这里简化，假设你只用它来训练 Embeddings
+
+    return train_loader
 def load_ogb_mag(root_path: str, preprocess: str = "metapath2vec") -> HeteroData:
     """
     Load the OGB_MAG dataset.

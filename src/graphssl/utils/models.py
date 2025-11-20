@@ -211,3 +211,27 @@ def create_model(
     # logger.debug(f"  Trainable parameters: {trainable_params:,}")
     
     return model
+
+
+# 在 models.py 中添加一个简单的类用于训练阶段
+class LinkPredictionModel(torch.nn.Module):
+    def __init__(self, encoder):
+        super().__init__()
+        self.encoder = encoder  # 这里传入你的 HeteroGraphSAGE
+
+    def forward(self, x_dict, edge_index_dict, edge_label_index, target_edge_type):
+        # 1. Encoder: 获取所有节点的 embeddings
+        # 注意：HeteroGraphSAGE.forward 返回 (logits, embeddings)
+        # 我们只需要 embeddings
+        _, embeddings_dict = self.encoder(x_dict, edge_index_dict)
+
+        # 2. Decoder: 获取边的源节点和目标节点
+        source_type, _, dest_type = target_edge_type
+        row, col = edge_label_index
+
+        source_emb = embeddings_dict[source_type][row]
+        dest_emb = embeddings_dict[dest_type][col]
+
+        # 3. 计算相似度 (点积)
+        # 结果形状: [batch_size]
+        return (source_emb * dest_emb).sum(dim=-1)
