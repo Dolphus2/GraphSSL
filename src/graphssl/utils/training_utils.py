@@ -341,7 +341,7 @@ def extract_embeddings(
         
         # Get target nodes
         batch_size = batch[target_node_type].batch_size
-        embeddings = embeddings[:batch_size]
+        embeddings = embeddings[:batch_size] # Keep only target nodes, not context nodes
         y = batch[target_node_type].y[:batch_size]
         
         embeddings_list.append(embeddings.cpu())
