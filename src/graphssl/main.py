@@ -11,7 +11,7 @@ import wandb
 import time
 from pathlib import Path
 
-from graphssl.utils.data_utils import load_ogb_mag, create_neighbor_loaders, create_link_loaders, get_dataset_info
+from graphssl.utils.data_utils import load_ogb_mag, create_neighbor_loaders, create_link_loaders, get_dataset_info, create_edge_splits
 from graphssl.utils.models import create_model
 from graphssl.utils.training_utils import train_model, test_model, extract_embeddings
 from graphssl.utils.objective_utils import (
@@ -21,6 +21,10 @@ from graphssl.utils.objective_utils import (
     SelfSupervisedEdgeReconstruction,
     EdgeDecoder,
     FeatureDecoder
+)
+from graphssl.utils.downstream import (
+    evaluate_node_property_prediction,
+    evaluate_link_prediction
 )
 
 logger = logging.getLogger(__name__)
@@ -73,19 +77,24 @@ def run_pipeline(args):
     print("Step 2: Creating Data Loaders")
     print("="*80)
     
+    # Initialize edge_splits as None (will be populated for link prediction tasks)
+    edge_splits = None
+    
     if args.objective_type == "supervised_link_prediction" or args.objective_type == "self_supervised_edge":
-        # Create link prediction loaders
-        train_loader, val_loader, test_loader = create_link_loaders(
+        # Create link prediction loaders with edge splits
+        train_loader, val_loader, test_loader, edge_splits = create_link_loaders(
             data,
             target_edge_type=tuple(args.target_edge_type.split(",")),
             num_neighbors=args.num_neighbors,
             batch_size=args.batch_size,
             neg_sampling_ratio=args.neg_sampling_ratio,
             num_workers=args.num_workers,
-            split_edges=True
+            split_edges=True,
+            seed=args.seed
         )
         inductive_train_loader = None  # Not used for link prediction
         transductive_train_loader = train_loader
+        logger.info(f"Edge splits stored for downstream evaluation (seed={args.seed})")
     else:
         # Create neighbor loaders for node-level tasks
         inductive_train_loader, transductive_train_loader, val_loader, test_loader = create_neighbor_loaders(
@@ -291,7 +300,132 @@ def run_pipeline(args):
         logger.info(f"  Val embeddings shape: {val_embeddings.shape}")
         logger.info(f"  Test embeddings shape: {test_embeddings.shape}")
     
+    # ==================== Step 10: Downstream Evaluation (Optional) ====================
+    if args.downstream_eval:
+        print("\n" + "="*80)
+        print("Step 10: Downstream Evaluation")
+        print("="*80)
+        
+        # Ensure embeddings are available for downstream evaluation
+        embeddings_path = results_path / "embeddings.pt"
+        
+        # Load or extract embeddings - always define these variables in Step 10
+        if embeddings_path.exists():
+            # Load from saved file
+            logger.info(f"Loading embeddings from: {embeddings_path}")
+            embeddings_data = torch.load(embeddings_path)
+            train_embeddings = embeddings_data['train_embeddings']
+            train_labels = embeddings_data['train_labels']
+            val_embeddings = embeddings_data['val_embeddings']
+            val_labels = embeddings_data['val_labels']
+            test_embeddings = embeddings_data['test_embeddings']
+            test_labels = embeddings_data['test_labels']
+        else:
+            # Extract embeddings from model
+            logger.info("Extracting embeddings from model...")
+            train_embeddings, train_labels = extract_embeddings(
+                model, transductive_train_loader, device, args.target_node
+            )
+            val_embeddings, val_labels = extract_embeddings(
+                model, val_loader, device, args.target_node
+            )
+            test_embeddings, test_labels = extract_embeddings(
+                model, test_loader, device, args.target_node
+            )
+            # Save for future use
+            torch.save({
+                'train_embeddings': train_embeddings,
+                'train_labels': train_labels,
+                'val_embeddings': val_embeddings,
+                'val_labels': val_labels,
+                'test_embeddings': test_embeddings,
+                'test_labels': test_labels
+            }, embeddings_path)
+            logger.info(f"Embeddings saved to: {embeddings_path}")
+        
+        # Ensure labels are available (required for downstream evaluation)
+        if train_labels is None or val_labels is None or test_labels is None:
+            raise ValueError("Labels are required for downstream evaluation but were not found in embeddings")
+        
+        # Step 10a: Node Property Prediction
+        if args.downstream_task in ["node", "both"]:
+            node_results = evaluate_node_property_prediction(
+                train_embeddings=train_embeddings,
+                train_labels=train_labels,
+                val_embeddings=val_embeddings,
+                val_labels=val_labels,
+                test_embeddings=test_embeddings,
+                test_labels=test_labels,
+                num_classes=dataset_info['num_classes'],
+                device=device,
+                n_runs=args.downstream_n_runs,
+                hidden_dim=args.downstream_hidden_dim,
+                num_layers=args.downstream_num_layers,
+                dropout=args.downstream_dropout,
+                batch_size=args.downstream_batch_size,
+                lr=args.downstream_lr,
+                weight_decay=args.downstream_weight_decay,
+                num_epochs=args.downstream_epochs,
+                early_stopping_patience=args.downstream_patience,
+                verbose=True
+            )
+            
+            # Save node prediction results
+            node_results_path = results_path / "downstream_node_results.pt"
+            torch.save(node_results, node_results_path)
+            logger.info(f"Node property prediction results saved to: {node_results_path}")
+        
+        # Step 10b: Link Prediction
+        if args.downstream_task in ["link", "both"]:
+            # For link prediction, we need edge indices
+            target_edge_type = tuple(args.target_edge_type.split(","))
+            
+            # Use edge splits from Step 2 if available, otherwise create new splits
+            if edge_splits is not None:
+                logger.info(f"Using edge splits from Step 2 for edge type: {target_edge_type}")
+                train_edge_index, val_edge_index, test_edge_index = edge_splits
+            else:
+                logger.info(f"Creating new edge splits for edge type: {target_edge_type}")
+                logger.warning("Edge splits not available from Step 2 - creating new splits with same seed")
+                
+                # Get full edge index and use create_edge_splits() function
+                full_edge_index = data[target_edge_type].edge_index
+                train_edge_index, val_edge_index, test_edge_index = create_edge_splits(
+                    edge_index=full_edge_index,
+                    train_ratio=0.8,
+                    val_ratio=0.1,
+                    seed=args.seed
+                )
+            
+            link_results = evaluate_link_prediction(
+                train_embeddings=train_embeddings,
+                train_edge_index=train_edge_index,
+                val_embeddings=val_embeddings,
+                val_edge_index=val_edge_index,
+                test_embeddings=test_embeddings,
+                test_edge_index=test_edge_index,
+                device=device,
+                n_runs=args.downstream_n_runs,
+                num_neg_samples=args.downstream_neg_samples,
+                hidden_dim=args.downstream_hidden_dim,
+                num_layers=args.downstream_num_layers,
+                dropout=args.downstream_dropout,
+                batch_size=args.downstream_batch_size,
+                lr=args.downstream_lr,
+                weight_decay=args.downstream_weight_decay,
+                num_epochs=args.downstream_epochs,
+                early_stopping_patience=args.downstream_patience,
+                verbose=True
+            )
+            
+            # Save link prediction results
+            link_results_path = results_path / "downstream_link_results.pt"
+            torch.save(link_results, link_results_path)
+            logger.info(f"Link prediction results saved to: {link_results_path}")
+    
     # ==================== Final Summary ====================
+    # Clean up wandb
+    wandb.finish()
     print("\n" + "="*80)
     print("Pipeline Completed Successfully!")
     print("="*80)
@@ -300,6 +434,7 @@ def run_pipeline(args):
         print(f"  Test {metric.capitalize()}: {value:.4f}")
     print(f"\nAll outputs saved to: {results_path}")
     print("="*80)
+
 
 
 def cli():
@@ -363,7 +498,7 @@ def cli():
     parser.add_argument(
         "--target_edge_type",
         type=str,
-        default="author,writes,paper",
+        default="paper,cites,paper",
         help="Target edge type for link prediction (comma-separated: src,relation,dst)"
     )
     parser.add_argument(
@@ -509,6 +644,80 @@ def cli():
         help="Logging level"
     )
     
+    # Downstream evaluation arguments
+    parser.add_argument(
+        "--downstream_eval",
+        action="store_true",
+        help="Run downstream evaluation tasks"
+    )
+    parser.add_argument(
+        "--downstream_task",
+        type=str,
+        default="both",
+        choices=["node", "link", "both"],
+        help="Downstream task type: node property prediction, link prediction, or both"
+    )
+    parser.add_argument(
+        "--downstream_n_runs",
+        type=int,
+        default=10,
+        help="Number of independent runs for downstream evaluation (for uncertainty estimation)"
+    )
+    parser.add_argument(
+        "--downstream_hidden_dim",
+        type=int,
+        default=128,
+        help="Hidden dimension for downstream MLP classifiers"
+    )
+    parser.add_argument(
+        "--downstream_num_layers",
+        type=int,
+        default=2,
+        help="Number of layers in downstream MLP classifiers"
+    )
+    parser.add_argument(
+        "--downstream_dropout",
+        type=float,
+        default=0.5,
+        help="Dropout rate for downstream classifiers"
+    )
+    parser.add_argument(
+        "--downstream_batch_size",
+        type=int,
+        default=1024,
+        help="Batch size for downstream classifier training"
+    )
+    parser.add_argument(
+        "--downstream_lr",
+        type=float,
+        default=0.001,
+        help="Learning rate for downstream classifiers"
+    )
+    parser.add_argument(
+        "--downstream_weight_decay",
+        type=float,
+        default=0.0,
+        help="Weight decay for downstream classifiers"
+    )
+    parser.add_argument(
+        "--downstream_epochs",
+        type=int,
+        default=100,
+        help="Maximum number of epochs for downstream classifier training"
+    )
+    parser.add_argument(
+        "--downstream_patience",
+        type=int,
+        default=10,
+        help="Early stopping patience for downstream classifiers"
+    )
+    parser.add_argument(
+        "--downstream_neg_samples",
+        type=int,
+        default=1,
+        help="Number of negative samples per positive edge for downstream link prediction"
+    )
+    
     args = parser.parse_args()
     
     # Configure logging
@@ -542,6 +751,18 @@ def cli():
             "use_edge_decoder": args.use_edge_decoder,
             "use_feature_decoder": args.use_feature_decoder,
             "metric_for_best": args.metric_for_best,
+            "downstream_eval": args.downstream_eval,
+            "downstream_task": args.downstream_task,
+            "downstream_n_runs": args.downstream_n_runs,
+            "downstream_hidden_dim": args.downstream_hidden_dim,
+            "downstream_num_layers": args.downstream_num_layers,
+            "downstream_dropout": args.downstream_dropout,
+            "downstream_batch_size": args.downstream_batch_size,
+            "downstream_lr": args.downstream_lr,
+            "downstream_weight_decay": args.downstream_weight_decay,
+            "downstream_epochs": args.downstream_epochs,
+            "downstream_patience": args.downstream_patience,
+            "downstream_neg_samples": args.downstream_neg_samples,
         }
     )
     

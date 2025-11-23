@@ -13,7 +13,7 @@
 #
 # LSF script for running GraphSSL supervised learning on DTU HPC
 # Adjust the parameters above according to your needs
-# Submit from GraphSSL root directory: bsub < src/graphssl/run_hpc.sh
+# Submit from GraphSSL root directory: bsub < scripts/run_hpc.sh
 #
 
 echo "Starting GraphSSL Supervised Learning Pipeline"

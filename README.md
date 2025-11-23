@@ -57,4 +57,5 @@ GraphSSL/
 
 - [QUICKSTART.md](QUICKSTART.md) - Quick start guide
 - [src/graphssl/README.md](src/graphssl/README.md) - Detailed documentation
+- [docs/DOWNSTREAM_EVALUATION.md](docs/DOWNSTREAM_EVALUATION.md) - Downstream evaluation guide
 - [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) - Implementation details 

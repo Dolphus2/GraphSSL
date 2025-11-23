@@ -133,8 +133,9 @@ def create_link_loaders(
     batch_size: int = 1024,
     neg_sampling_ratio: float = 1.0,
     num_workers: int = 4,
-    split_edges: bool = True
-) -> Tuple[LinkNeighborLoader, LinkNeighborLoader, LinkNeighborLoader]:
+    split_edges: bool = True,
+    seed: int = 42
+) -> Tuple[LinkNeighborLoader, LinkNeighborLoader, LinkNeighborLoader, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """
     Create train, validation, and test LinkNeighborLoaders for link prediction.
     
@@ -146,9 +147,11 @@ def create_link_loaders(
         neg_sampling_ratio: Ratio of negative to positive samples (e.g., 1.0 = 1:1 ratio)
         num_workers: Number of worker processes for data loading
         split_edges: Whether to split edges into train/val/test (80/10/10 split)
+        seed: Random seed for reproducible edge splitting
     
     Returns:
-        Tuple of (train_loader, val_loader, test_loader)
+        Tuple of (train_loader, val_loader, test_loader, edge_splits)
+        where edge_splits is (train_edge_index, val_edge_index, test_edge_index)
     """
     logger.debug(f"Creating LinkNeighborLoaders with:")
     logger.debug(f"  Target edge type: {target_edge_type}")
@@ -162,20 +165,14 @@ def create_link_loaders(
     
     # Split edges into train/val/test if requested
     if split_edges:
-        # Shuffle edges
-        perm = torch.randperm(num_edges)
-        edge_index = edge_index[:, perm]
-        
-        # 80/10/10 split
-        train_size = int(0.8 * num_edges)
-        val_size = int(0.1 * num_edges)
-        
-        train_edge_index = edge_index[:, :train_size]
-        val_edge_index = edge_index[:, train_size:train_size + val_size]
-        test_edge_index = edge_index[:, train_size + val_size:]
-        
-        logger.debug(f"  Split edges: train={train_edge_index.size(1)}, "
-                    f"val={val_edge_index.size(1)}, test={test_edge_index.size(1)}")
+        train_edge_index, val_edge_index, test_edge_index = create_edge_splits(
+            edge_index=edge_index,
+            train_ratio=0.8,
+            val_ratio=0.1,
+            seed=seed
+        )
+        logger.info(f"  Edge splits (seed={seed}): train={train_edge_index.size(1)}, "
+                   f"val={val_edge_index.size(1)}, test={test_edge_index.size(1)}")
     else:
         # Use all edges for all splits (not recommended for evaluation)
         train_edge_index = edge_index
@@ -228,7 +225,9 @@ def create_link_loaders(
     logger.debug(f"  Val batches: ~{len(val_loader)}")
     logger.debug(f"  Test batches: ~{len(test_loader)}")
     
-    return train_loader, val_loader, test_loader
+    # Return loaders and edge splits for downstream evaluation
+    edge_splits = (train_edge_index, val_edge_index, test_edge_index)
+    return train_loader, val_loader, test_loader, edge_splits
 
 
 def get_dataset_info(data: HeteroData, target_node_type: str = "paper") -> Dict:
@@ -257,6 +256,49 @@ def get_dataset_info(data: HeteroData, target_node_type: str = "paper") -> Dict:
         info["num_nodes"][node_type] = data[node_type].num_nodes
     
     return info
+
+
+def create_edge_splits(
+    edge_index: torch.Tensor,
+    train_ratio: float = 0.8,
+    val_ratio: float = 0.1,
+    seed: int = 42
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Split edge indices into train/val/test sets.
+    
+    Args:
+        edge_index: Edge indices [2, num_edges]
+        train_ratio: Ratio of edges for training (default: 0.8)
+        val_ratio: Ratio of edges for validation (default: 0.1)
+        seed: Random seed for reproducible splitting
+    
+    Returns:
+        Tuple of (train_edge_index, val_edge_index, test_edge_index)
+    """
+    num_edges = edge_index.size(1)
+    
+    # Shuffle edges with fixed seed for reproducibility
+    generator = torch.Generator().manual_seed(seed)
+    perm = torch.randperm(num_edges, generator=generator)
+    edge_index_shuffled = edge_index[:, perm]
+    
+    # Calculate split sizes
+    train_size = int(train_ratio * num_edges)
+    val_size = int(val_ratio * num_edges)
+    
+    # Split edges
+    train_edge_index = edge_index_shuffled[:, :train_size]
+    val_edge_index = edge_index_shuffled[:, train_size:train_size + val_size]
+    test_edge_index = edge_index_shuffled[:, train_size + val_size:]
+    
+    logger.debug(f"Split {num_edges} edges (seed={seed}): "
+                f"train={train_edge_index.size(1)}, "
+                f"val={val_edge_index.size(1)}, "
+                f"test={test_edge_index.size(1)}")
+    
+    return train_edge_index, val_edge_index, test_edge_index
+
 
 def to_inductive(data: HeteroData, node_type: str) -> HeteroData:
     """

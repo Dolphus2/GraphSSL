@@ -2,7 +2,7 @@
 #
 # Example script to run the supervised learning pipeline on HPC
 # This script demonstrates different configurations for training
-# Run from GraphSSL root directory: bash src/graphssl/run_examples.sh
+# Run from GraphSSL root directory: bash scripts/run_examples.sh
 #
 pwd
 
