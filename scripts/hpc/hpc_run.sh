@@ -1,5 +1,5 @@
 #!/bin/bash
-#BSUB -J gssl_sup
+#BSUB -J gssl_self_sce
 #BSUB -o logs/graphssl_%J.out
 #BSUB -e logs/graphssl_%J.err
 #BSUB -q gpua100
@@ -52,8 +52,8 @@ echo ""
 # Run the supervised learning pipeline
 python -m graphssl.main \
     --data_root data \
-    --results_root results/hpc_run_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
-    --objective_type supervised_node_classification \
+    --results_root results/hpc_run5_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
+    --objective_type self_supervised_node \
     --loss_fn sce \
     --hidden_channels 128 \
     --num_layers 3 \
@@ -68,9 +68,9 @@ python -m graphssl.main \
     --extract_embeddings \
     --downstream_eval \
     --downstream_task both \
-    --downstream_n_runs 20 \
+    --downstream_n_runs 50 \
     --downstream_hidden_dim 128 \
-    --downstream_epochs 1000 \
+    --downstream_epochs 100 \
     --seed 42
 
 echo ""

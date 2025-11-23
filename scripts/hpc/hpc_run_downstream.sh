@@ -84,7 +84,7 @@ python -m graphssl.main \
     --data_root data \
     --results_root results/hpc_self_supervised_downstream_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
     --objective_type self_supervised_node \
-    --hidden_channels 256 \
+    --hidden_channels 128 \
     --num_layers 3 \
     --batch_size 1024 \
     --epochs 100 \
@@ -127,7 +127,7 @@ echo ""
 echo "Example 3: Self Supervised Link Reconstruction + Both Downstream Task"
 python -m graphssl.main \
     --data_root data \
-    --results_root results/hpc_link_pred_downstream_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
+    --results_root results/hpc_self_link_downstream_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
     --objective_type self_supervised_edge \
     --target_edge_type "author,writes,paper" \
     --hidden_channels 128 \
@@ -151,7 +151,7 @@ python -m graphssl.main \
     --data_root data \
     --results_root results/hpc_quick_downstream_test_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
     --objective_type supervised_node_classification \
-    --hidden_channels 64 \
+    --hidden_channels 128 \
     --num_layers 2 \
     --epochs 5 \
     --batch_size 512 \
