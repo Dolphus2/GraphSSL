@@ -176,7 +176,7 @@ def run_pipeline(args):
         train_embeddings, train_labels = extract_embeddings(
             model, transductive_train_loader, device, args.target_node
         ) 
-        # Embeddings for inductive and transcutive are not equivalent. 
+        # Embeddings for inductive and transductive are not equivalent. 
         # Transductive train embeddings contain information about val and test nodes as well 
         # and so are appropriate for down stream tasks, where the graph has evolved further than test. 
         
