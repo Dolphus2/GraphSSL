@@ -13,7 +13,7 @@
 #
 # LSF script for running GraphSSL supervised learning on DTU HPC
 # Adjust the parameters above according to your needs
-# Submit from GraphSSL root directory: bsub < scripts/run_hpc.sh
+# Submit from GraphSSL root directory: bsub < scripts/hpc/run_hpc.sh
 #
 
 echo "Starting GraphSSL Supervised Learning Pipeline"
@@ -53,20 +53,24 @@ echo ""
 python -m graphssl.main \
     --data_root data \
     --results_root results/hpc_run_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
+    --objective_type supervised_node_classification \
+    --loss_fn sce \
     --hidden_channels 128 \
-    --num_layers 2 \
+    --num_layers 3 \
     --batch_size 1024 \
-    --num_neighbors 15 10 \
     --epochs 1000 \
     --lr 0.001 \
     --dropout 0.5 \
-    --patience 10 \
+    --patience 100 \
     --num_workers 4 \
     --weight_decay 0.0005 \
-    --aggr "mean" \
-    --aggr_rel "sum" \
     --log_interval 20 \
     --extract_embeddings \
+    --downstream_eval \
+    --downstream_task both \
+    --downstream_n_runs 20 \
+    --downstream_hidden_dim 128 \
+    --downstream_epochs 1000 \
     --seed 42
 
 echo ""
