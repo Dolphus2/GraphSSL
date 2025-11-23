@@ -9,6 +9,7 @@ from typing import Dict, Tuple, Optional
 import time
 from tqdm import tqdm
 from pathlib import Path
+import wandb
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +19,11 @@ def train_epoch(
     loader: NeighborLoader,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    epoch: int,
+    global_step: int,
+    log_interval: int = 20,
     target_node_type: str = "paper"
-) -> Tuple[float, float]:
+) -> Tuple[float, float, int]:
     """
     Train the model for one epoch.
     
@@ -28,16 +32,19 @@ def train_epoch(
         loader: Training data loader
         optimizer: Optimizer
         device: Device to train on
+        epoch: Epoch num
         target_node_type: Target node type for prediction
     
     Returns:
-        Tuple of (average loss, accuracy)
+        Tuple of (average loss, accuracy, global step)
     """
     model.train()
     
     total_loss = 0
     total_correct = 0
     total_examples = 0
+    running_loss, running_acc = 0.0, 0.0
+    num_logged = 0
     
     for batch in tqdm(loader, desc="Training", leave=False):
         batch = batch.to(device)
@@ -59,11 +66,44 @@ def train_epoch(
         optimizer.step()
         
         # Track metrics
-        total_loss += loss.item() * batch_size
-        total_correct += int((out.argmax(dim=-1) == y).sum())
+        batch_loss = loss.item()
+        batch_correct = int((out.argmax(dim=-1) == y).sum())
+
+        total_loss += batch_loss * batch_size
+        total_correct += batch_correct
         total_examples += batch_size
+
+        global_step += 1
+        running_loss += batch_loss
+        running_acc += batch_correct / max(batch_size, 1)
+        num_logged += 1
+
+        if global_step % log_interval == 0:
+            avg_loss = running_loss / num_logged
+            avg_acc = running_acc / num_logged
+            running_loss, running_acc = 0.0, 0.0
+            num_logged = 0
+
+            # current learning rate (if no scheduler, this still works)
+            current_lr = optimizer.param_groups[0]["lr"]
+
+            # gpu memory (if on cuda)
+            gpu_mem = None
+            if device.type == "cuda":
+                gpu_mem = torch.cuda.memory_allocated(device) / 1024**2
+
+            log_dict = {
+                "train/loss": avg_loss,
+                "train/acc": avg_acc,
+                "train/lr": current_lr,
+                "train/epoch": epoch,
+            }
+            if gpu_mem is not None:
+                log_dict["sys/gpu_mem_mb"] = gpu_mem
+
+            wandb.log(log_dict, step=global_step)
     
-    return total_loss / total_examples, total_correct / total_examples
+    return total_loss / total_examples, total_correct / total_examples, global_step
 
 
 @torch.no_grad()
@@ -120,6 +160,7 @@ def train_model(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     num_epochs: int = 100,
+    log_interval: int = 20,
     target_node_type: str = "paper",
     early_stopping_patience: int = 10,
     checkpoint_dir: Optional[str] = None,
@@ -157,9 +198,10 @@ def train_model(
         "epoch_time": []
     }
     
-    best_val_acc = 0
+    best_val_acc = 0.0
     best_epoch = 0
     patience_counter = 0
+    global_step = 0
     
     logger.info(f"Starting training for {num_epochs} epochs")
     
@@ -167,8 +209,8 @@ def train_model(
         start_time = time.time()
         
         # Train
-        train_loss, train_acc = train_epoch(
-            model, train_loader, optimizer, device, target_node_type
+        train_loss, train_acc, global_step = train_epoch(
+            model, train_loader, optimizer, device, epoch, global_step, log_interval, target_node_type
         )
         
         # Validate
@@ -184,6 +226,18 @@ def train_model(
         history["val_loss"].append(val_loss)
         history["val_acc"].append(val_acc)
         history["epoch_time"].append(epoch_time)
+
+        wandb.log(
+            {
+                "val/acc": float(val_acc),
+                "val/loss": float(val_loss),
+                "train/epoch_loss": float(train_loss),
+                "train/epoch_acc": float(train_acc),
+                "val/epoch": epoch,
+                "epoch_time": epoch_time
+            },
+            step=global_step
+        )
         
         # Print progress
         if verbose:
