@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from typing import Dict, Tuple, Optional, Any
 
 logger = logging.getLogger(__name__)
-
+loss_functions = ['mse', 'sce', 'mer', 'tar']
 
 class TrainingObjective(ABC):
     """
@@ -76,11 +76,11 @@ class SupervisedNodeClassification(TrainingObjective):
             Tuple of (loss, metrics_dict)
         """
         # Forward pass
-        logits, _ = model(batch.x_dict, batch.edge_index_dict)
+        out_dict, _ = model(batch.x_dict, batch.edge_index_dict)
         
         # Get target nodes only (seed nodes in the batch)
         batch_size = batch[self.target_node_type].batch_size
-        logits = logits[:batch_size]
+        logits = out_dict[self.target_node_type][:batch_size]
         y = batch[self.target_node_type].y[:batch_size]
         
         # Compute loss
@@ -142,7 +142,7 @@ class SupervisedLinkPrediction(TrainingObjective):
             Tuple of (loss, metrics_dict)
         """
         # Get node embeddings from encoder
-        _, embeddings_dict = model(batch.x_dict, batch.edge_index_dict)
+        out_dict, embeddings_dict = model(batch.x_dict, batch.edge_index_dict)
         
         # Get edge indices and labels for target edge type
         edge_label_index = batch[self.target_edge_type].edge_label_index
@@ -192,8 +192,9 @@ class SelfSupervisedNodeReconstruction(TrainingObjective):
     def __init__(
         self,
         target_node_type: str = "paper",
-        mask_ratio: float = 0.15,
-        decoder: Optional[torch.nn.Module] = None
+        mask_ratio: float = 0.5, # a large mask ratio like in GraphMAE
+        decoder: Optional[torch.nn.Module] = None,
+        loss_fn = "mse"
     ):
         """
         Args:
@@ -204,6 +205,8 @@ class SelfSupervisedNodeReconstruction(TrainingObjective):
         super().__init__(target_node_type)
         self.mask_ratio = mask_ratio
         self.decoder = decoder
+        assert loss_fn in loss_functions
+        self.loss_fn = loss_fn
     
     def step(
         self,
@@ -232,11 +235,11 @@ class SelfSupervisedNodeReconstruction(TrainingObjective):
             batch.x_dict[self.target_node_type] = original_features.masked_fill(mask, 0.0)
         
         # Forward pass through encoder
-        _, embeddings = model(batch.x_dict, batch.edge_index_dict)
+        out_dict, embeddings_dict = model(batch.x_dict, batch.edge_index_dict)
         
         # Get target node embeddings
         batch_size = batch[self.target_node_type].batch_size
-        embeddings = embeddings[:batch_size]
+        embeddings = embeddings_dict[self.target_node_type][:batch_size]
         target_features = original_features[:batch_size]
         
         # Decode to reconstruct features
@@ -246,18 +249,22 @@ class SelfSupervisedNodeReconstruction(TrainingObjective):
             # Default: use embeddings directly (assumes same dimension)
             reconstructed = embeddings
         
-        # Compute reconstruction loss (MSE)
-        loss = F.mse_loss(reconstructed, target_features)
+        # Compute reconstruction loss
+        if self.loss_fn == "sce":
+            loss = sce_loss(reconstructed, target_features)
+        else:
+            # (MSE)
+            loss = F.mse_loss(reconstructed, target_features)
         
         metrics = {
             "loss": loss.item(),
-            "mse": loss.item()
+            self.loss_fn: loss.item()
         }
         
         return loss, metrics
     
     def get_metric_names(self) -> list:
-        return ["loss", "mse"]
+        return ["loss", self.loss_fn]
 
 
 class SelfSupervisedEdgeReconstruction(TrainingObjective):
@@ -398,3 +405,16 @@ class FeatureDecoder(torch.nn.Module):
             Reconstructed features [num_nodes, feature_dim]
         """
         return self.decoder(embeddings)
+
+def sce_loss(x, y, alpha=3):
+    x = F.normalize(x, p=2, dim=-1)
+    y = F.normalize(y, p=2, dim=-1)
+
+    # loss =  - (x * y).sum(dim=-1)
+    # loss = (x_h - y_h).norm(dim=1).pow(alpha)
+
+    loss = (1 - (x * y).sum(dim=-1)).pow_(alpha)
+
+    loss = loss.mean()
+    return loss
+    

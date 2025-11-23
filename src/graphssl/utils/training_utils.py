@@ -4,8 +4,8 @@ Training and evaluation utilities for graph neural networks
 import logging
 import torch
 import torch.nn.functional as F
-from torch_geometric.loader import NeighborLoader
-from typing import Dict, Tuple, Optional, Any
+from torch_geometric.loader import NeighborLoader, LinkNeighborLoader
+from typing import Dict, Tuple, Optional, Any, Union
 import time
 from tqdm import tqdm
 from pathlib import Path
@@ -111,7 +111,7 @@ def _log_training_metrics(
 
 def train_epoch(
     model: torch.nn.Module,
-    loader: NeighborLoader,
+    loader: Union[NeighborLoader, LinkNeighborLoader],
     optimizer: torch.optim.Optimizer,
     objective: TrainingObjective,
     device: torch.device,
@@ -181,7 +181,7 @@ def train_epoch(
 @torch.no_grad()
 def evaluate(
     model: torch.nn.Module,
-    loader: NeighborLoader,
+    loader: Union[NeighborLoader, LinkNeighborLoader],
     objective: TrainingObjective,
     device: torch.device
 ) -> Dict[str, float]:
@@ -221,8 +221,8 @@ def evaluate(
 
 def train_model(
     model: torch.nn.Module,
-    train_loader: NeighborLoader,
-    val_loader: NeighborLoader,
+    train_loader: Union[NeighborLoader, LinkNeighborLoader],
+    val_loader: Union[NeighborLoader, LinkNeighborLoader],
     optimizer: torch.optim.Optimizer,
     objective: TrainingObjective,
     device: torch.device,
@@ -352,7 +352,7 @@ def train_model(
 
 def test_model(
     model: torch.nn.Module,
-    test_loader: NeighborLoader,
+    test_loader: Union[NeighborLoader, LinkNeighborLoader],
     objective: TrainingObjective,
     device: torch.device
 ) -> Dict[str, float]:
@@ -381,7 +381,7 @@ def test_model(
 @torch.no_grad()
 def extract_embeddings(
     model: torch.nn.Module,
-    loader: NeighborLoader,
+    loader: Union[NeighborLoader, LinkNeighborLoader],
     device: torch.device,
     target_node_type: str = "paper",
     return_labels: bool = True
@@ -408,11 +408,11 @@ def extract_embeddings(
         batch = batch.to(device)
         
         # Forward pass
-        _, embeddings = model(batch.x_dict, batch.edge_index_dict)
+        out_dict, embeddings_dict = model(batch.x_dict, batch.edge_index_dict)
         
         # Get target nodes
         batch_size = batch[target_node_type].batch_size
-        embeddings = embeddings[:batch_size]  # Keep only target nodes, not context nodes
+        embeddings = embeddings_dict[target_node_type][:batch_size]  # Keep only target nodes, not context nodes
         
         embeddings_list.append(embeddings.cpu())
         

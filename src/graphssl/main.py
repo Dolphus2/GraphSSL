@@ -11,9 +11,17 @@ import wandb
 import time
 from pathlib import Path
 
-from graphssl.utils.data_utils import load_ogb_mag, create_neighbor_loaders, get_dataset_info
+from graphssl.utils.data_utils import load_ogb_mag, create_neighbor_loaders, create_link_loaders, get_dataset_info
 from graphssl.utils.models import create_model
 from graphssl.utils.training_utils import train_model, test_model, extract_embeddings
+from graphssl.utils.objective_utils import (
+    SupervisedNodeClassification,
+    SupervisedLinkPrediction,
+    SelfSupervisedNodeReconstruction,
+    SelfSupervisedEdgeReconstruction,
+    EdgeDecoder,
+    FeatureDecoder
+)
 
 logger = logging.getLogger(__name__)
 
@@ -65,17 +73,92 @@ def run_pipeline(args):
     print("Step 2: Creating Data Loaders")
     print("="*80)
     
-    inductive_train_loader, transductive_train_loader, val_loader, test_loader = create_neighbor_loaders(
-        data,
-        num_neighbors=args.num_neighbors,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        target_node_type=args.target_node
-    )
+    if args.objective_type == "supervised_link_prediction" or args.objective_type == "self_supervised_edge":
+        # Create link prediction loaders
+        train_loader, val_loader, test_loader = create_link_loaders(
+            data,
+            target_edge_type=tuple(args.target_edge_type.split(",")),
+            num_neighbors=args.num_neighbors,
+            batch_size=args.batch_size,
+            neg_sampling_ratio=args.neg_sampling_ratio,
+            num_workers=args.num_workers,
+            split_edges=True
+        )
+        inductive_train_loader = None  # Not used for link prediction
+        transductive_train_loader = train_loader
+    else:
+        # Create neighbor loaders for node-level tasks
+        inductive_train_loader, transductive_train_loader, val_loader, test_loader = create_neighbor_loaders(
+            data,
+            num_neighbors=args.num_neighbors,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            target_node_type=args.target_node
+        )
     
-    # ==================== Step 3: Create Model ====================
+    # ==================== Step 3: Create Training Objective ====================
     print("\n" + "="*80)
-    print("Step 3: Creating Model")
+    print("Step 3: Creating Training Objective")
+    print("="*80)
+    
+    if args.objective_type == "supervised_node_classification":
+        objective = SupervisedNodeClassification(target_node_type=args.target_node)
+        logger.info(f"Objective: Supervised Node Classification on '{args.target_node}'")
+    
+    elif args.objective_type == "supervised_link_prediction":
+        target_edge_type = tuple(args.target_edge_type.split(","))
+        # Create optional edge decoder if specified
+        decoder = None
+        if args.use_edge_decoder:
+            decoder = EdgeDecoder(hidden_dim=args.hidden_channels, dropout=args.dropout)
+            logger.info("Using MLP-based edge decoder")
+        objective = SupervisedLinkPrediction(
+            target_edge_type=target_edge_type,
+            decoder=decoder
+        )
+        logger.info(f"Objective: Supervised Link Prediction on '{target_edge_type}'")
+    
+    elif args.objective_type == "self_supervised_node":
+        # Create optional feature decoder
+        decoder = None
+        if args.use_feature_decoder:
+            feature_dim = data[args.target_node].x.shape[1]
+            decoder = FeatureDecoder(
+                hidden_dim=args.hidden_channels,
+                feature_dim=feature_dim,
+                dropout=args.dropout
+            )
+            logger.info("Using MLP-based feature decoder")
+        objective = SelfSupervisedNodeReconstruction(
+            target_node_type=args.target_node,
+            mask_ratio=args.mask_ratio,
+            decoder=decoder,
+            loss_fn=args.loss_fn
+        )
+        logger.info(f"Objective: Self-Supervised Node Reconstruction on '{args.target_node}'")
+        logger.info(f"  Mask ratio: {args.mask_ratio}")
+    
+    elif args.objective_type == "self_supervised_edge":
+        target_edge_type = tuple(args.target_edge_type.split(","))
+        # Create optional edge decoder
+        decoder = None
+        if args.use_edge_decoder:
+            decoder = EdgeDecoder(hidden_dim=args.hidden_channels, dropout=args.dropout)
+            logger.info("Using MLP-based edge decoder")
+        objective = SelfSupervisedEdgeReconstruction(
+            target_edge_type=target_edge_type,
+            negative_sampling_ratio=args.neg_sampling_ratio,
+            decoder=decoder
+        )
+        logger.info(f"Objective: Self-Supervised Edge Reconstruction on '{target_edge_type}'")
+        logger.info(f"  Negative sampling ratio: {args.neg_sampling_ratio}")
+    
+    else:
+        raise ValueError(f"Unknown objective type: {args.objective_type}")
+    
+    # ==================== Step 4: Create Model ====================
+    print("\n" + "="*80)
+    print("Step 4: Creating Model")
     print("="*80)
     
     model = create_model(
@@ -90,9 +173,9 @@ def run_pipeline(args):
     )
     model = model.to(device)
     
-    # ==================== Step 4: Setup Optimizer ====================
+    # ==================== Step 5: Setup Optimizer ====================
     print("\n" + "="*80)
-    print("Step 4: Setting up Optimizer")
+    print("Step 5: Setting up Optimizer")
     print("="*80)
     
     optimizer = torch.optim.Adam(
@@ -102,9 +185,9 @@ def run_pipeline(args):
     )
     logger.info(f"Optimizer: Adam (lr={args.lr}, weight_decay={args.weight_decay})")
     
-    # ==================== Step 5: Train Model ====================
+    # ==================== Step 6: Train Model ====================
     print("\n" + "="*80)
-    print("Step 5: Training Model")
+    print("Step 6: Training Model")
     print("="*80)
     
     # Create checkpoint directory
@@ -113,46 +196,49 @@ def run_pipeline(args):
     checkpoint_dir = results_path / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     
+    # Determine which train loader to use
+    train_loader_to_use = inductive_train_loader if inductive_train_loader is not None else transductive_train_loader
+    
     history = train_model(
         model=model,
-        train_loader=inductive_train_loader,
+        train_loader=train_loader_to_use,
         val_loader=val_loader,
         optimizer=optimizer,
+        objective=objective,
         device=device,
         num_epochs=args.epochs,
         log_interval=args.log_interval,
-        target_node_type=args.target_node,
         early_stopping_patience=args.patience,
         checkpoint_dir=str(checkpoint_dir),
-        verbose=True
+        verbose=True,
+        metric_for_best=args.metric_for_best
     )
     
-    # ==================== Step 6: Test Model ====================
+    # ==================== Step 7: Test Model ====================
     print("\n" + "="*80)
-    print("Step 6: Testing Model")
+    print("Step 7: Testing Model")
     print("="*80)
     
-    test_loss, test_acc = test_model(
+    test_metrics = test_model(
         model=model,
         test_loader=test_loader,
-        device=device,
-        target_node_type=args.target_node
+        objective=objective,
+        device=device
     )
     
-    # ==================== Step 7: Save Results ====================
+    # ==================== Step 8: Save Results ====================
     print("\n" + "="*80)
-    print("Step 7: Saving Results")
+    print("Step 8: Saving Results")
     print("="*80)
     
-    # Results path was already created in Step 5
+    # Results path was already created in Step 6
     
     # Save final model with complete training information
-    model_path = results_path / "model_supervised.pt"
+    model_path = results_path / f"model_{args.objective_type}.pt"
     torch.save({
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
-        'test_acc': test_acc,
-        'test_loss': test_loss,
+        'test_metrics': test_metrics,
         'args': vars(args),
         'history': history
     }, model_path)
@@ -165,10 +251,10 @@ def run_pipeline(args):
     torch.save(history, history_path)
     logger.info(f"Training history saved to: {history_path}")
     
-    # ==================== Step 8: Extract Embeddings (Optional) ====================
+    # ==================== Step 9: Extract Embeddings (Optional) ====================
     if args.extract_embeddings:
         print("\n" + "="*80)
-        print("Step 8: Extracting Embeddings")
+        print("Step 9: Extracting Embeddings")
         print("="*80)
         # Consider extracting embeddings once by running the model on the full graph.
         
@@ -209,9 +295,9 @@ def run_pipeline(args):
     print("\n" + "="*80)
     print("Pipeline Completed Successfully!")
     print("="*80)
-    print(f"\nFinal Results:")
-    print(f"  Test Accuracy: {test_acc:.4f}")
-    print(f"  Test Loss: {test_loss:.4f}")
+    print(f"\nFinal Test Results:")
+    for metric, value in test_metrics.items():
+        print(f"  Test {metric.capitalize()}: {value:.4f}")
     print(f"\nAll outputs saved to: {results_path}")
     print("="*80)
 
@@ -247,6 +333,66 @@ def cli():
         type=str,
         default="paper",
         help="Target node type for prediction"
+    )
+    
+    # Objective arguments
+    parser.add_argument(
+        "--objective_type",
+        type=str,
+        default="supervised_node_classification",
+        choices=[
+            "supervised_node_classification",
+            "supervised_link_prediction",
+            "self_supervised_node",
+            "self_supervised_edge"
+        ],
+        help="Training objective type"
+    )
+    parser.add_argument(
+        "--loss_fn",
+        type=str,
+        default="mse",
+        choices=[
+            "mse",
+            "sce",
+            "mer",
+            "tar"
+        ],
+        help="loss function"
+    )
+    parser.add_argument(
+        "--target_edge_type",
+        type=str,
+        default="author,writes,paper",
+        help="Target edge type for link prediction (comma-separated: src,relation,dst)"
+    )
+    parser.add_argument(
+        "--mask_ratio",
+        type=float,
+        default=0.5,
+        help="Feature masking ratio for self-supervised node reconstruction"
+    )
+    parser.add_argument(
+        "--neg_sampling_ratio",
+        type=float,
+        default=1.0,
+        help="Negative sampling ratio for link prediction"
+    )
+    parser.add_argument(
+        "--use_edge_decoder",
+        action="store_true",
+        help="Use MLP-based edge decoder for link prediction (default: dot product)"
+    )
+    parser.add_argument(
+        "--use_feature_decoder",
+        action="store_true",
+        help="Use MLP-based feature decoder for node reconstruction"
+    )
+    parser.add_argument(
+        "--metric_for_best",
+        type=str,
+        default="acc",
+        help="Metric to use for selecting best model (e.g., 'acc', 'loss')"
     )
     
     # Model arguments
@@ -295,7 +441,7 @@ def cli():
         "--num_neighbors",
         type=int,
         nargs="+",
-        default=[15, 10],
+        default=[30]*2,
         help="Number of neighbors to sample at each layer"
     )
     parser.add_argument(
@@ -374,8 +520,11 @@ def cli():
 
     wandb.init(
         project="graphssl",
-        name=f"graphssl_{int(time.time())}",
+        name=f"graphssl_{args.objective_type}_{int(time.time())}",
         config={
+            "objective_type": args.objective_type,
+            "target_node": args.target_node,
+            "target_edge_type": args.target_edge_type,
             "hidden_channels": args.hidden_channels,
             "num_layers": args.num_layers,
             "dropout": args.dropout,
@@ -388,6 +537,11 @@ def cli():
             "patience": args.patience,
             "aggr": args.aggr,
             "aggr_rel": args.aggr_rel,
+            "mask_ratio": args.mask_ratio,
+            "neg_sampling_ratio": args.neg_sampling_ratio,
+            "use_edge_decoder": args.use_edge_decoder,
+            "use_feature_decoder": args.use_feature_decoder,
+            "metric_for_best": args.metric_for_best,
         }
     )
     

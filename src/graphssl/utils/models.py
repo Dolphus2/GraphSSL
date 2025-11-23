@@ -42,38 +42,23 @@ class HomogeneousGraphSAGE(nn.Module):
         self.use_batchnorm = use_batchnorm
         self.dropout_rate = dropout
         
-        # Encoder: GraphSAGE layers
-        self.encoder = self._build_encoder(
-            in_channels, hidden_channels, num_layers, aggr, use_batchnorm
-        )
+        # Encoder: GraphSAGE convolution layers (flat structure for to_hetero)
+        self.convs = nn.ModuleList()
+        self.convs.append(SAGEConv(in_channels, hidden_channels, aggr=aggr))
+        
+        for _ in range(num_layers - 1):
+            self.convs.append(SAGEConv(hidden_channels, hidden_channels, aggr=aggr))
+        
+        # Batch normalization layers
+        if use_batchnorm:
+            self.batch_norms = nn.ModuleList()
+            for _ in range(num_layers):
+                self.batch_norms.append(nn.BatchNorm1d(hidden_channels))
+        
+        self.dropout = nn.Dropout(p=dropout)
         
         # Decoder: Classification head
         self.decoder = Linear(hidden_channels, out_channels)
-    
-    def _build_encoder(self, in_channels, hidden_channels, num_layers, aggr, use_batchnorm):
-        """Build the encoder consisting of GraphSAGE layers."""
-        dropout_rate = self.dropout_rate
-        
-        class Encoder(nn.Module):
-            def __init__(self):
-                super().__init__()
-                # Create GraphSAGE convolution layers
-                self.convs = nn.ModuleList()
-                self.convs.append(SAGEConv(in_channels, hidden_channels, aggr=aggr))
-                
-                for _ in range(num_layers - 1):
-                    self.convs.append(SAGEConv(hidden_channels, hidden_channels, aggr=aggr))
-                
-                # Create batch normalization layers
-                if use_batchnorm:
-                    self.batch_norms = nn.ModuleList()
-                    for _ in range(num_layers):
-                        self.batch_norms.append(nn.BatchNorm1d(hidden_channels))
-                
-                self.use_batchnorm = use_batchnorm
-                self.dropout = nn.Dropout(p=dropout_rate)
-        
-        return Encoder()
     
     def encode(self, x, edge_index):
         """
@@ -86,14 +71,14 @@ class HomogeneousGraphSAGE(nn.Module):
         Returns:
             Node embeddings
         """
-        for i, conv in enumerate(self.encoder.convs):
+        for i, conv in enumerate(self.convs):
             x = conv(x, edge_index)
             
-            if self.encoder.use_batchnorm:
-                x = self.encoder.batch_norms[i](x)
+            if self.use_batchnorm:
+                x = self.batch_norms[i](x)
             
             x = F.relu(x)
-            x = self.encoder.dropout(x)
+            x = self.dropout(x)
         
         return x
     
@@ -185,10 +170,11 @@ class HeteroGraphSAGE(nn.Module):
             edge_index_dict: Dictionary of edge indices for each edge type
         
         Returns:
-            Logits for target node type and embeddings
+            Tuple of (out_dict, embeddings_dict) where both are dictionaries
+            containing outputs/embeddings for all node types
         """
-        out, embeddings = self.model(x_dict, edge_index_dict)
-        return out[self.target_node_type], embeddings[self.target_node_type]
+        out_dict, embeddings_dict = self.model(x_dict, edge_index_dict)
+        return out_dict, embeddings_dict
     
     def inference(self, x_dict, edge_index_dict):
         """

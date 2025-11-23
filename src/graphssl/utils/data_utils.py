@@ -6,7 +6,7 @@ import logging
 import torch
 import torch_geometric.transforms as T
 from torch_geometric.datasets import OGB_MAG
-from torch_geometric.loader import NeighborLoader
+from torch_geometric.loader import NeighborLoader, LinkNeighborLoader
 from torch_geometric.data import HeteroData
 from typing import Tuple, Dict
 
@@ -50,7 +50,7 @@ def load_ogb_mag(root_path: str, preprocess: str = "metapath2vec") -> HeteroData
 
 def create_neighbor_loaders(
     data: HeteroData,
-    num_neighbors: list = [15, 10],
+    num_neighbors: list = [30]*2,
     batch_size: int = 1024,
     num_workers: int = 4,
     target_node_type: str = "paper"
@@ -124,6 +124,111 @@ def create_neighbor_loaders(
     logger.debug(f"  Test batches: ~{len(test_loader)}")
     
     return inductive_train_loader, transductive_train_loader, val_loader, test_loader
+
+
+def create_link_loaders(
+    data: HeteroData,
+    target_edge_type: Tuple[str, str, str],
+    num_neighbors: list = [15, 10],
+    batch_size: int = 1024,
+    neg_sampling_ratio: float = 1.0,
+    num_workers: int = 4,
+    split_edges: bool = True
+) -> Tuple[LinkNeighborLoader, LinkNeighborLoader, LinkNeighborLoader]:
+    """
+    Create train, validation, and test LinkNeighborLoaders for link prediction.
+    
+    Args:
+        data: HeteroData object
+        target_edge_type: Edge type tuple (src_type, relation, dst_type) for link prediction
+        num_neighbors: Number of neighbors to sample at each layer [layer1, layer2, ...]
+        batch_size: Batch size for loading (number of edges per batch)
+        neg_sampling_ratio: Ratio of negative to positive samples (e.g., 1.0 = 1:1 ratio)
+        num_workers: Number of worker processes for data loading
+        split_edges: Whether to split edges into train/val/test (80/10/10 split)
+    
+    Returns:
+        Tuple of (train_loader, val_loader, test_loader)
+    """
+    logger.debug(f"Creating LinkNeighborLoaders with:")
+    logger.debug(f"  Target edge type: {target_edge_type}")
+    logger.debug(f"  Neighbors per layer: {num_neighbors}")
+    logger.debug(f"  Batch size: {batch_size}")
+    logger.debug(f"  Negative sampling ratio: {neg_sampling_ratio}")
+    
+    # Get edge indices for target edge type
+    edge_index = data[target_edge_type].edge_index
+    num_edges = edge_index.size(1)
+    
+    # Split edges into train/val/test if requested
+    if split_edges:
+        # Shuffle edges
+        perm = torch.randperm(num_edges)
+        edge_index = edge_index[:, perm]
+        
+        # 80/10/10 split
+        train_size = int(0.8 * num_edges)
+        val_size = int(0.1 * num_edges)
+        
+        train_edge_index = edge_index[:, :train_size]
+        val_edge_index = edge_index[:, train_size:train_size + val_size]
+        test_edge_index = edge_index[:, train_size + val_size:]
+        
+        logger.debug(f"  Split edges: train={train_edge_index.size(1)}, "
+                    f"val={val_edge_index.size(1)}, test={test_edge_index.size(1)}")
+    else:
+        # Use all edges for all splits (not recommended for evaluation)
+        train_edge_index = edge_index
+        val_edge_index = edge_index
+        test_edge_index = edge_index
+        logger.warning("Using all edges for train/val/test - this will cause data leakage!")
+    
+    # Create data copies for each split to avoid edge leakage
+    # For proper evaluation, we should use only train edges in the graph
+    data_train = data.clone()
+    
+    # Train loader with negative sampling
+    train_loader = LinkNeighborLoader(
+        data_train,
+        num_neighbors=num_neighbors,
+        edge_label_index=(target_edge_type, train_edge_index),
+        edge_label=torch.ones(train_edge_index.size(1)),
+        neg_sampling_ratio=neg_sampling_ratio,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+    )
+    
+    # Validation loader with negative sampling
+    val_loader = LinkNeighborLoader(
+        data,
+        num_neighbors=num_neighbors,
+        edge_label_index=(target_edge_type, val_edge_index),
+        edge_label=torch.ones(val_edge_index.size(1)),
+        neg_sampling_ratio=neg_sampling_ratio,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+    )
+    
+    # Test loader with negative sampling
+    test_loader = LinkNeighborLoader(
+        data,
+        num_neighbors=num_neighbors,
+        edge_label_index=(target_edge_type, test_edge_index),
+        edge_label=torch.ones(test_edge_index.size(1)),
+        neg_sampling_ratio=neg_sampling_ratio,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+    )
+    
+    logger.info("Link prediction loaders created successfully!")
+    logger.debug(f"  Train batches: ~{len(train_loader)}")
+    logger.debug(f"  Val batches: ~{len(val_loader)}")
+    logger.debug(f"  Test batches: ~{len(test_loader)}")
+    
+    return train_loader, val_loader, test_loader
 
 
 def get_dataset_info(data: HeteroData, target_node_type: str = "paper") -> Dict:
