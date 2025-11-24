@@ -269,11 +269,11 @@ def run_pipeline(args):
         
         logger.info("Extracting train embeddings...")
         train_embeddings, train_labels = extract_embeddings(
-            model, transductive_train_loader, device, args.target_node
+            model, inductive_train_loader, device, args.target_node
         ) 
         # Embeddings for inductive and transductive are not equivalent. 
         # Transductive train embeddings contain information about val and test nodes as well 
-        # and so are appropriate for down stream tasks, where the graph has evolved further than test. 
+        # and so are appropriate for downstream tasks, where the graph has evolved further than test. 
         
         logger.info("Extracting val embeddings...")
         val_embeddings, val_labels = extract_embeddings(

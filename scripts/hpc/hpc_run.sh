@@ -1,5 +1,5 @@
 #!/bin/bash
-#BSUB -J gssl_self_sce
+#BSUB -J gssl_self_e
 #BSUB -o logs/graphssl_%J.out
 #BSUB -e logs/graphssl_%J.err
 #BSUB -q gpua100
@@ -13,7 +13,7 @@
 #
 # LSF script for running GraphSSL supervised learning on DTU HPC
 # Adjust the parameters above according to your needs
-# Submit from GraphSSL root directory: bsub < scripts/hpc/run_hpc.sh
+# Submit from GraphSSL root directory: bsub < scripts/hpc/hpc_run.sh
 #
 
 echo "Starting GraphSSL Supervised Learning Pipeline"
@@ -53,7 +53,7 @@ echo ""
 python -m graphssl.main \
     --data_root data \
     --results_root results/hpc_run5_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
-    --objective_type self_supervised_node \
+    --objective_type self_supervised_edge \
     --loss_fn sce \
     --hidden_channels 128 \
     --num_layers 3 \
