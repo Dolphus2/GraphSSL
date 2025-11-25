@@ -26,7 +26,11 @@ from graphssl.utils.downstream import (
     evaluate_node_property_prediction,
     evaluate_link_prediction
 )
-
+import os
+os.environ["WANDB_MODE"] = "offline"
+# 或者
+os.environ["WANDB_DISABLED"] = "true"
+wandb.init(project="graphssl", mode="offline")
 logger = logging.getLogger(__name__)
 
 
@@ -119,7 +123,7 @@ def run_pipeline(args):
         # Create optional edge decoder if specified
         decoder = None
         if args.use_edge_decoder:
-            decoder = EdgeDecoder(hidden_dim=args.hidden_channels, dropout=args.dropout)
+            decoder = EdgeDecoder(hidden_dim=args.hidden_channels).to(device)
             logger.info("Using MLP-based edge decoder")
         objective = SupervisedLinkPrediction(
             target_edge_type=target_edge_type,
@@ -136,7 +140,7 @@ def run_pipeline(args):
                 hidden_dim=args.hidden_channels,
                 feature_dim=feature_dim,
                 dropout=args.dropout
-            )
+            ).to(device)
             logger.info("Using MLP-based feature decoder")
         objective = SelfSupervisedNodeReconstruction(
             target_node_type=args.target_node,
@@ -152,7 +156,7 @@ def run_pipeline(args):
         # Create optional edge decoder
         decoder = None
         if args.use_edge_decoder:
-            decoder = EdgeDecoder(hidden_dim=args.hidden_channels, dropout=args.dropout)
+            decoder = EdgeDecoder(hidden_dim=args.hidden_channels, dropout=args.dropout).to(device)
             logger.info("Using MLP-based edge decoder")
         objective = SelfSupervisedEdgeReconstruction(
             target_edge_type=target_edge_type,
@@ -215,7 +219,7 @@ def run_pipeline(args):
         optimizer=optimizer,
         objective=objective,
         device=device,
-        num_epochs=args.epochs,
+        num_epochs=1,
         log_interval=args.log_interval,
         early_stopping_patience=args.patience,
         checkpoint_dir=str(checkpoint_dir),
@@ -396,7 +400,34 @@ def run_pipeline(args):
                     val_ratio=0.1,
                     seed=args.seed
                 )
-            
+            if args.objective_type == "supervised_link_prediction":
+
+                print("Running FULL GRAPH inference for link prediction evaluation...")
+                data_gpu = data.to(device)
+                # Full graph inference
+                model.eval()
+                data_gpu = data.to(device)
+                with torch.no_grad():
+                    out_dict, embeddings_dict = model(data_gpu.x_dict, data_gpu.edge_index_dict)
+
+                # If your graph is homogeneous (one node type)
+                if isinstance(embeddings_dict, dict) and len(embeddings_dict) == 1:
+                    # Get the only embedding
+                    full_embeddings = list(embeddings_dict.values())[0]
+
+                # If your graph is heterogeneous (multiple node types)
+                else:
+                    # If your link prediction uses a specific edge type
+                    # You must select its src/dst type embeddings based on your data
+                    # Example: paper → embeddings_dict["paper"]
+                    raise ValueError("Please specify which node type's embeddings to evaluate for link prediction.")
+
+                print(f"[Full Graph] embeddings shape = {full_embeddings.shape}")
+
+                # for link prediction downstream, train/val/test embeddings = full graph embedding
+                train_embeddings = full_embeddings
+                val_embeddings = full_embeddings
+                test_embeddings = full_embeddings
             link_results = evaluate_link_prediction(
                 train_embeddings=train_embeddings,
                 train_edge_index=train_edge_index,
@@ -474,7 +505,7 @@ def cli():
     parser.add_argument(
         "--objective_type",
         type=str,
-        default="supervised_node_classification",
+        default="supervised_link_prediction",
         choices=[
             "supervised_node_classification",
             "supervised_link_prediction",
@@ -577,7 +608,7 @@ def cli():
         type=int,
         nargs="+",
         default=[30]*2,
-        help="Number of neighbors to sample at each layer"
+        help="Number of neighbors to sample at ech layer"
     )
     parser.add_argument(
         "--batch_size",

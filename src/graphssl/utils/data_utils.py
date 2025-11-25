@@ -166,11 +166,13 @@ def create_link_loaders(
     # Split edges into train/val/test if requested
     if split_edges:
         train_edge_index, val_edge_index, test_edge_index = create_edge_splits(
+
             edge_index=edge_index,
             train_ratio=0.8,
             val_ratio=0.1,
             seed=seed
         )
+
         logger.info(f"  Edge splits (seed={seed}): train={train_edge_index.size(1)}, "
                    f"val={val_edge_index.size(1)}, test={test_edge_index.size(1)}")
     else:

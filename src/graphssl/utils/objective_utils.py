@@ -106,81 +106,94 @@ class SupervisedNodeClassification(TrainingObjective):
 
 class SupervisedLinkPrediction(TrainingObjective):
     """
-    Supervised link prediction objective.
-    Predicts existence of edges between nodes.
+    Masked MAE-style link prediction.
+    Randomly masks part of the positive edges, and learns to reconstruct them.
     """
-    
+
     def __init__(
         self,
         target_edge_type: Tuple[str, str, str],
-        decoder: Optional[torch.nn.Module] = None
+        decoder: Optional[torch.nn.Module] = None,
+        mask_ratio: float = 0.3
     ):
-        """
-        Args:
-            target_edge_type: Edge type to predict (src_type, relation, dst_type)
-            decoder: Optional edge decoder module (if None, uses dot product)
-        """
         super().__init__(target_node_type=target_edge_type[0])
         self.target_edge_type = target_edge_type
         self.decoder = decoder
-    
-    def step(
-        self,
-        model: torch.nn.Module,
-        batch: Any,
-        is_training: bool = True
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """
-        Forward pass and loss computation for link prediction.
-        
-        Args:
-            model: The model (encoder)
-            batch: HeteroData batch with edge_label_index and edge_label
-            is_training: Whether in training mode
-        
-        Returns:
-            Tuple of (loss, metrics_dict)
-        """
-        # Get node embeddings from encoder
-        out_dict, embeddings_dict = model(batch.x_dict, batch.edge_index_dict)
-        
-        # Get edge indices and labels for target edge type
+        self.mask_ratio = mask_ratio
+        self.loss_fn = torch.nn.L1Loss()  # MAE
+
+
+    def step(self, model, batch, is_training=True):
+        # ===========================
+        # 1) Encoder: Node embeddings
+        # ===========================
+        _, embeddings_dict = model(batch.x_dict, batch.edge_index_dict)
+
         edge_label_index = batch[self.target_edge_type].edge_label_index
-        edge_label = batch[self.target_edge_type].edge_label
-        
-        # Get source and destination node types
+        edge_label = batch[self.target_edge_type].edge_label.float()
+
         src_type, _, dst_type = self.target_edge_type
-        
-        # Get embeddings for source and destination nodes
-        src_embeddings = embeddings_dict[src_type][edge_label_index[0]]
-        dst_embeddings = embeddings_dict[dst_type][edge_label_index[1]]
-        
-        # Decode edge scores
+
+        src_emb = embeddings_dict[src_type][edge_label_index[0]]
+        dst_emb = embeddings_dict[dst_type][edge_label_index[1]]
+
+        # ===========================
+        # 2) Edge scores (decoder)
+        # ===========================
         if self.decoder is not None:
-            edge_scores = self.decoder(src_embeddings, dst_embeddings).squeeze()
+            edge_scores = self.decoder(src_emb, dst_emb).squeeze()
         else:
-            # Default: dot product similarity (logits)
-            edge_scores = (src_embeddings * dst_embeddings).sum(dim=-1)
-        
-        # Compute binary cross-entropy loss
-        loss = F.binary_cross_entropy_with_logits(edge_scores, edge_label.float())
-        
-        # Compute accuracy
-        pred = (edge_scores > 0).float()
-        correct = int((pred == edge_label).sum())
-        accuracy = correct / edge_label.size(0)
-        
+            # default: dot product
+            edge_scores = (src_emb * dst_emb).sum(dim=-1)
+
+        # ===========================
+        # 3) Mask part of *positive* edges
+        # ===========================
+        pos_idx = (edge_label == 1).nonzero(as_tuple=True)[0]
+        num_pos = pos_idx.size(0)
+        mask_num = max(1, int(self.mask_ratio * num_pos))
+
+        if mask_num > 0:
+            perm = torch.randperm(num_pos, device=edge_label.device)
+            masked_pos = pos_idx[perm[:mask_num]]
+        else:
+            masked_pos = torch.tensor([], dtype=torch.long, device=edge_label.device)
+
+        # 负样本不 mask
+        keep_mask = torch.ones_like(edge_label, dtype=torch.bool)
+        keep_mask[masked_pos] = False
+
+        # 模型 loss 只计算 masked 部分 => MAE 重构这些被遮蔽的边
+        masked_edge_scores = edge_scores[masked_pos]
+        masked_labels = edge_label[masked_pos]  # 一般是 1，但可扩展成连续权重
+
+        if masked_labels.numel() == 0:
+            # 极端情况：mask_ratio 非常小、batch 太小
+            loss = torch.tensor(0.0, requires_grad=True, device=edge_label.device)
+            metrics = {"mae": 0.0, "masked_edges": 0}
+            return loss, metrics
+
+        # ===========================
+        # 4) Masked MAE loss
+        # ===========================
+        loss = self.loss_fn(masked_edge_scores, masked_labels)
+
+        # ===========================
+        # 5) Metrics for monitoring
+        # ===========================
+        with torch.no_grad():
+            mae = (masked_edge_scores - masked_labels).abs().mean().item()
+
         metrics = {
-            "loss": loss.item(),
-            "acc": accuracy,
-            "correct": correct,
-            "total": edge_label.size(0)
+            "mae": mae,
+            "masked_edges": int(mask_num),
         }
-        
+
         return loss, metrics
-    
-    def get_metric_names(self) -> list:
-        return ["loss", "acc"]
+
+    def get_metric_names(self):
+        return ["mae"]
+
 
 
 class SelfSupervisedNodeReconstruction(TrainingObjective):
