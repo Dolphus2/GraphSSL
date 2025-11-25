@@ -127,7 +127,8 @@ def run_pipeline(args):
             logger.info("Using MLP-based edge decoder")
         objective = SupervisedLinkPrediction(
             target_edge_type=target_edge_type,
-            decoder=decoder
+            decoder=decoder,
+            negative_sampling_ratio=args.neg_sampling_ratio
         )
         logger.info(f"Objective: Supervised Link Prediction on '{target_edge_type}'")
     
@@ -219,7 +220,7 @@ def run_pipeline(args):
         optimizer=optimizer,
         objective=objective,
         device=device,
-        num_epochs=1,
+        num_epochs=3,
         log_interval=args.log_interval,
         early_stopping_patience=args.patience,
         checkpoint_dir=str(checkpoint_dir),
@@ -270,10 +271,13 @@ def run_pipeline(args):
         print("Step 9: Extracting Embeddings")
         print("="*80)
         # Consider extracting embeddings once by running the model on the full graph.
-        
+        loader_for_embeddings = inductive_train_loader if inductive_train_loader is not None else transductive_train_loader
+        if loader_for_embeddings is None:
+            raise ValueError("No training loader available for embedding extraction.")
+
         logger.info("Extracting train embeddings...")
         train_embeddings, train_labels = extract_embeddings(
-            model, inductive_train_loader, device, args.target_node
+            model, loader_for_embeddings, device, args.target_node
         ) 
         # Embeddings for inductive and transductive are not equivalent. 
         # Transductive train embeddings contain information about val and test nodes as well 
@@ -607,13 +611,13 @@ def cli():
         "--num_neighbors",
         type=int,
         nargs="+",
-        default=[30]*2,
+        default=[2]*2,
         help="Number of neighbors to sample at ech layer"
     )
     parser.add_argument(
         "--batch_size",
         type=int,
-        default=1024,
+        default=64,
         help="Batch size for training"
     )
     parser.add_argument(
@@ -627,7 +631,7 @@ def cli():
     parser.add_argument(
         "--epochs",
         type=int,
-        default=100,
+        default=1,
         help="Maximum number of training epochs"
     )
     parser.add_argument(
