@@ -82,7 +82,7 @@ def run_pipeline(args):
     
     if args.objective_type == "supervised_link_prediction" or args.objective_type == "self_supervised_edge":
         # Create link prediction loaders with edge splits
-        train_loader, val_loader, test_loader, edge_splits = create_link_loaders(
+        train_loader, val_loader, test_loader, global_loader, edge_splits = create_link_loaders(
             data,
             target_edge_type=tuple(args.target_edge_type.split(",")),
             num_neighbors=args.num_neighbors,
@@ -92,12 +92,11 @@ def run_pipeline(args):
             split_edges=True,
             seed=args.seed
         )
-        inductive_train_loader = None  # Not used for link prediction
-        transductive_train_loader = train_loader
+        inductive_train_loader = train_loader # Just reuse the name
         logger.info(f"Edge splits stored for downstream evaluation (seed={args.seed})")
     else:
         # Create neighbor loaders for node-level tasks
-        inductive_train_loader, transductive_train_loader, val_loader, test_loader = create_neighbor_loaders(
+        inductive_train_loader, val_loader, test_loader, global_loader= create_neighbor_loaders(
             data,
             num_neighbors=args.num_neighbors,
             batch_size=args.batch_size,
@@ -206,8 +205,8 @@ def run_pipeline(args):
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
     
     # Determine which train loader to use
-    train_loader_to_use = inductive_train_loader if inductive_train_loader is not None else transductive_train_loader
-    
+    train_loader_to_use = inductive_train_loader
+   
     history = train_model(
         model=model,
         train_loader=train_loader_to_use,
@@ -271,6 +270,10 @@ def run_pipeline(args):
         train_embeddings, train_labels = extract_embeddings(
             model, inductive_train_loader, device, args.target_node
         ) 
+        logger.info("Extracting global embeddings...")
+        global_embeddings, _ = extract_embeddings(
+            model, global_loader, device, target_node
+        )
         # Embeddings for inductive and transductive are not equivalent. 
         # Transductive train embeddings contain information about val and test nodes as well 
         # and so are appropriate for downstream tasks, where the graph has evolved further than test. 
@@ -289,6 +292,7 @@ def run_pipeline(args):
         embeddings_path = results_path / "embeddings.pt"
         torch.save({
             'train_embeddings': train_embeddings,
+            'global_embeddings': global_embeddings,
             'train_labels': train_labels,
             'val_embeddings': val_embeddings,
             'val_labels': val_labels,
@@ -297,6 +301,7 @@ def run_pipeline(args):
         }, embeddings_path)
         logger.info(f"Embeddings saved to: {embeddings_path}")
         logger.info(f"  Train embeddings shape: {train_embeddings.shape}")
+        logger.info(f"  Global embeddings shape: {global_embeddings.shape}")
         logger.info(f"  Val embeddings shape: {val_embeddings.shape}")
         logger.info(f"  Test embeddings shape: {test_embeddings.shape}")
     
@@ -315,6 +320,7 @@ def run_pipeline(args):
             logger.info(f"Loading embeddings from: {embeddings_path}")
             embeddings_data = torch.load(embeddings_path)
             train_embeddings = embeddings_data['train_embeddings']
+            global_embeddings = embeddings_data['global_embeddings']
             train_labels = embeddings_data['train_labels']
             val_embeddings = embeddings_data['val_embeddings']
             val_labels = embeddings_data['val_labels']
@@ -324,7 +330,10 @@ def run_pipeline(args):
             # Extract embeddings from model
             logger.info("Extracting embeddings from model...")
             train_embeddings, train_labels = extract_embeddings(
-                model, transductive_train_loader, device, args.target_node
+                model, inductive_train_loader, device, args.target_node
+            )
+            global_embeddings, _ = extract_embeddings(
+                model, global_loader, device, args.target_node
             )
             val_embeddings, val_labels = extract_embeddings(
                 model, val_loader, device, args.target_node
@@ -335,6 +344,7 @@ def run_pipeline(args):
             # Save for future use
             torch.save({
                 'train_embeddings': train_embeddings,
+                'global_embeddings': global_embeddings,
                 'train_labels': train_labels,
                 'val_embeddings': val_embeddings,
                 'val_labels': val_labels,
@@ -396,13 +406,15 @@ def run_pipeline(args):
                     val_ratio=0.1,
                     seed=args.seed
                 )
-            
+            max_edges = None
+            if args.test_mode:
+                # In test mode, limit the number of edges for quick evaluation
+                max_edges = 2000
+                logger.info(f"Test mode enabled - limiting to max_edges={max_edges} for link prediction")
             link_results = evaluate_link_prediction(
-                train_embeddings=train_embeddings,
+                embeddings=global_embeddings,
                 train_edge_index=train_edge_index,
-                val_embeddings=val_embeddings,
                 val_edge_index=val_edge_index,
-                test_embeddings=test_embeddings,
                 test_edge_index=test_edge_index,
                 device=device,
                 n_runs=args.downstream_n_runs,
@@ -415,6 +427,7 @@ def run_pipeline(args):
                 weight_decay=args.downstream_weight_decay,
                 num_epochs=args.downstream_epochs,
                 early_stopping_patience=args.downstream_patience,
+                max_edges=max_edges,
                 verbose=True
             )
             
@@ -643,7 +656,6 @@ def cli():
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
         help="Logging level"
     )
-    
     # Downstream evaluation arguments
     parser.add_argument(
         "--downstream_eval",
@@ -717,6 +729,11 @@ def cli():
         default=1,
         help="Number of negative samples per positive edge for downstream link prediction"
     )
+    parser.add_argument(
+        "--test_mode",
+        action="store_true",
+        help="Run in test mode with minimal settings for quick checks"
+    )
     
     args = parser.parse_args()
     
@@ -766,6 +783,8 @@ def cli():
         }
     )
     
+    if args.test_mode:
+        logger.info("Test mode enabled - using minimal settings for quick checks")
     # Run pipeline
     run_pipeline(args)
 

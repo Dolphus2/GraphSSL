@@ -6,10 +6,14 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import TensorDataset, DataLoader, Dataset
+from torch_geometric.utils import negative_sampling
+from graphssl.utils.data_utils import create_edge_splits
+from graphssl.utils.training_utils import extract_embeddings
 from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 from tqdm import tqdm
+from pathlib import Path
 import wandb
 
 logger = logging.getLogger(__name__)
@@ -390,72 +394,124 @@ def evaluate_node_property_prediction(
     return results
 
 
-def create_link_prediction_data(
-    embeddings: torch.Tensor,
-    edge_index: torch.Tensor,
-    num_neg_samples: int = 1
-) -> Tuple[torch.Tensor, torch.Tensor]:
+class EdgeFeatureDataset(Dataset):
     """
-    Create link prediction dataset from embeddings and edges.
-    
-    Args:
-        embeddings: Node embeddings [N, embedding_dim]
-        edge_index: Positive edges [2, num_edges]
-        num_neg_samples: Number of negative samples per positive edge
-    
-    Returns:
-        Tuple of (edge_features, edge_labels)
-        edge_features: [num_samples, 2*embedding_dim] concatenated node embeddings
-        edge_labels: [num_samples] binary labels (1 for positive, 0 for negative)
-    """
-    num_nodes = embeddings.shape[0]
-    num_pos_edges = edge_index.shape[1]
-    
-    # Positive edge features (concatenate source and target embeddings)
-    pos_src = embeddings[edge_index[0]]
-    pos_dst = embeddings[edge_index[1]]
-    pos_edge_features = torch.cat([pos_src, pos_dst], dim=1)
-    pos_labels = torch.ones(num_pos_edges)
-    
-    # Generate negative edges (random pairs not in positive edges)
-    num_neg_edges = num_pos_edges * num_neg_samples
-    
-    # Create set of positive edges for fast lookup
-    pos_edge_set = set(zip(edge_index[0].tolist(), edge_index[1].tolist()))
-    
-    neg_edges = []
-    while len(neg_edges) < num_neg_edges:
-        src = torch.randint(0, num_nodes, (1,)).item()
-        dst = torch.randint(0, num_nodes, (1,)).item()
-        if src != dst and (src, dst) not in pos_edge_set:
-            neg_edges.append((src, dst))
-    
-    neg_edge_index = torch.tensor(neg_edges).t()
-    
-    # Negative edge features
-    neg_src = embeddings[neg_edge_index[0]]
-    neg_dst = embeddings[neg_edge_index[1]]
-    neg_edge_features = torch.cat([neg_src, neg_dst], dim=1)
-    neg_labels = torch.zeros(num_neg_edges)
-    
-    # Combine positive and negative samples
-    edge_features = torch.cat([pos_edge_features, neg_edge_features], dim=0)
-    edge_labels = torch.cat([pos_labels, neg_labels], dim=0)
-    
-    # Shuffle
-    perm = torch.randperm(edge_features.shape[0])
-    edge_features = edge_features[perm]
-    edge_labels = edge_labels[perm]
-    
-    return edge_features, edge_labels
+    Dataset for link prediction that returns (edge_features, label).
 
+    Edge features are computed on the fly from node embeddings:
+    e.g. concat(z_src, z_dst).
+    """
+
+    def __init__(
+        self,
+        embeddings: torch.Tensor,
+        edge_index: torch.Tensor,
+        edge_labels: torch.Tensor,
+    ):
+        """
+        Args:
+            embeddings: Node embeddings of shape [N_nodes, D].
+            edge_index: Edge index tensor of shape [2, E].
+                        Each column is (src, dst) global node IDs.
+            edge_labels: Edge labels tensor of shape [E], values in {0,1}.
+        """
+        assert edge_index.size(1) == edge_labels.size(0)
+        self.embeddings = embeddings
+        self.edge_index = edge_index
+        self.edge_labels = edge_labels
+
+    def __len__(self) -> int:
+        """
+        Returns:
+            Total number of edges (positive + negative).
+        """
+        return self.edge_labels.size(0)
+
+    def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Returns:
+            edge_feat: Tensor of shape [2 * D] (concatenated node embeddings).
+            label:     Scalar tensor with value 0 or 1.
+        """
+        src = self.edge_index[0, idx]
+        dst = self.edge_index[1, idx]
+        y   = self.edge_labels[idx]
+
+        z_src = self.embeddings[src]
+        z_dst = self.embeddings[dst]
+        edge_feat = torch.cat([z_src, z_dst], dim=-1)
+
+        return edge_feat, y
+
+def create_link_index_data(
+    edge_index,
+    num_nodes,
+    num_neg_samples=1,
+    device=None,
+    max_edges=None,
+    seed=42,
+):
+    """
+    Create (positive + negative) edges for link prediction.
+    When max_edges is given, only use a subset for fast local debugging.
+
+    Args:
+        edge_index:       [2, E] positive edges
+        num_nodes:        number of nodes
+        num_neg_samples:  negatives per positive
+        max_edges:        if set, sample only this many positive edges
+        seed:             reproducible sampling
+
+    Returns:
+        all_edges:  [2, N] sampled edges (pos + neg)
+        all_labels: [N]   labels (1 for pos, 0 for neg)
+    """
+    if device is None:
+        device = edge_index.device
+
+    torch.manual_seed(seed)
+
+    # -------------------------
+    # STEP 1: Subsample POSITIVE edges if requested
+    # -------------------------
+    E = edge_index.size(1)
+
+    if max_edges is not None and max_edges < E:
+        perm = torch.randperm(E, device=device)[:max_edges]
+        edge_index = edge_index[:, perm]
+        num_pos = max_edges
+    else:
+        num_pos = E
+
+    # -------------------------
+    # STEP 2: Negative sampling
+    # -------------------------
+    num_neg = num_pos * num_neg_samples
+
+    neg_edge = negative_sampling(
+        edge_index=edge_index,
+        num_nodes=num_nodes,
+        num_neg_samples=num_neg,
+        method="sparse",
+    ).to(device)
+
+    # -------------------------
+    # STEP 3: Labels and mixing
+    # -------------------------
+    pos_labels = torch.ones(num_pos, device=device)
+    neg_labels = torch.zeros(num_neg, device=device)
+
+    all_edges = torch.cat([edge_index, neg_edge], dim=1)
+    all_labels = torch.cat([pos_labels, neg_labels], dim=0)
+
+    # Shuffle for safety
+    perm = torch.randperm(all_edges.size(1), device=device)
+    return all_edges[:, perm], all_labels[perm]
 
 def evaluate_link_prediction(
-    train_embeddings: torch.Tensor,
+    embeddings: torch.Tensor,
     train_edge_index: torch.Tensor,
-    val_embeddings: torch.Tensor,
     val_edge_index: torch.Tensor,
-    test_embeddings: torch.Tensor,
     test_edge_index: torch.Tensor,
     device: torch.device,
     n_runs: int = 10,
@@ -468,17 +524,16 @@ def evaluate_link_prediction(
     weight_decay: float = 0.0,
     num_epochs: int = 100,
     early_stopping_patience: int = 10,
+    max_edges: Optional[int] = None,
     verbose: bool = True
 ) -> Dict[str, Any]:
     """
     Evaluate link prediction by training multiple classifier heads.
     
     Args:
-        train_embeddings: Training node embeddings [N_train, embedding_dim]
+        embeddings: Node embeddings [N_train, embedding_dim]
         train_edge_index: Training positive edges [2, num_train_edges]
-        val_embeddings: Validation node embeddings [N_val, embedding_dim]
         val_edge_index: Validation positive edges [2, num_val_edges]
-        test_embeddings: Test node embeddings [N_test, embedding_dim]
         test_edge_index: Test positive edges [2, num_test_edges]
         device: Device to train on
         n_runs: Number of independent runs for uncertainty estimation
@@ -502,41 +557,42 @@ def evaluate_link_prediction(
     logger.info(f"Train edges: {train_edge_index.shape[1]}")
     logger.info(f"Val edges: {val_edge_index.shape[1]}")
     logger.info(f"Test edges: {test_edge_index.shape[1]}")
-    logger.info(f"Embedding dim: {train_embeddings.shape[1]}")
+    logger.info(f"Embedding dim: {embeddings.shape[1]}")
     logger.info(f"Negative sampling ratio: {num_neg_samples}")
     logger.info(f"Running {n_runs} independent trials...")
     
     # Store results from all runs
     test_accuracies = []
     test_losses = []
-    
+    num_nodes = embeddings.size(0)
+    emb = embeddings.to(device)
+
+    # Build pos+neg edges and labels for each split.
+    train_edges, train_labels = create_link_index_data(
+        train_edge_index, num_nodes, num_neg_samples, device=device, max_edges=max_edges
+    )
+    val_edges, val_labels = create_link_index_data(
+        val_edge_index, num_nodes, num_neg_samples, device=device, max_edges=max_edges
+    )
+    test_edges, test_labels = create_link_index_data(
+        test_edge_index, num_nodes, num_neg_samples, device=device, max_edges=max_edges
+    )
+    train_dataset = EdgeFeatureDataset(emb, train_edges, train_labels)
+    val_dataset   = EdgeFeatureDataset(emb, val_edges, val_labels)
+    test_dataset  = EdgeFeatureDataset(emb, test_edges, test_labels)
+
+    # Create data loaders from datasets.
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    val_loader   = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+    test_loader  = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
     for run in range(n_runs):
         if verbose:
             logger.info(f"\nRun {run+1}/{n_runs}")
-        
-        # Create link prediction datasets (with different negative samples each run)
-        train_features, train_labels = create_link_prediction_data(
-            train_embeddings, train_edge_index, num_neg_samples
-        )
-        val_features, val_labels = create_link_prediction_data(
-            val_embeddings, val_edge_index, num_neg_samples
-        )
-        test_features, test_labels = create_link_prediction_data(
-            test_embeddings, test_edge_index, num_neg_samples
-        )
-        
-        # Create datasets and loaders
-        train_dataset = TensorDataset(train_features, train_labels)
-        val_dataset = TensorDataset(val_features, val_labels)
-        test_dataset = TensorDataset(test_features, test_labels)
-        
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
-        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-        
+
         # Create classifier (binary classification, output_dim=1)
         classifier = MLPClassifier(
-            input_dim=train_features.shape[1],  # 2 * embedding_dim
+            input_dim=emb.size(1) * 2,    # concat(z_src, z_dst)
             hidden_dim=hidden_dim,
             output_dim=1,  # Binary classification
             num_layers=num_layers,
@@ -606,3 +662,113 @@ def evaluate_link_prediction(
     })
     
     return results
+
+
+def run_downstream_evaluation(
+    args,
+    data,
+    device: torch.device,
+    results_path: Path,
+    num_classes: int
+) -> None:
+    """
+    Run optional downstream evaluation:
+    - Node property prediction
+    - Link prediction
+    """
+    # Ensure embeddings are available for downstream evaluation
+    embeddings_path = results_path / "embeddings.pt"
+
+    # Load or extract embeddings - always define these variables in Step 10
+    if embeddings_path.exists():
+        # Load from saved file
+        logger.info(f"Loading embeddings from: {embeddings_path}")
+        embeddings_data = torch.load(embeddings_path)
+        train_embeddings = embeddings_data['train_embeddings']
+        global_embeddings = embeddings_data['global_embeddings']
+        train_labels = embeddings_data['train_labels']
+        val_embeddings = embeddings_data['val_embeddings']
+        val_labels = embeddings_data['val_labels']
+        test_embeddings = embeddings_data['test_embeddings']
+        test_labels = embeddings_data['test_labels']
+    else:
+        raise ValueError("Embeddings are required for downstream evaluation but were not found.")
+
+    if train_labels is None or val_labels is None or test_labels is None:
+        raise ValueError("Labels are required for downstream evaluation but were not found in embeddings")
+
+    # Step 10a: Node property prediction
+    if args.downstream_task in ["node", "both"]:
+        node_results = evaluate_node_property_prediction(
+            train_embeddings=train_embeddings,
+            train_labels=train_labels,
+            val_embeddings=val_embeddings,
+            val_labels=val_labels,
+            test_embeddings=test_embeddings,
+            test_labels=test_labels,
+            num_classes=num_classes,
+            device=device,
+            n_runs=args.downstream_n_runs,
+            hidden_dim=args.downstream_hidden_dim,
+            num_layers=args.downstream_num_layers,
+            dropout=args.downstream_dropout,
+            batch_size=args.downstream_batch_size,
+            lr=args.downstream_lr,
+            weight_decay=args.downstream_weight_decay,
+            num_epochs=args.downstream_epochs,
+            early_stopping_patience=args.downstream_patience,
+            verbose=True,
+        )
+
+        # Save node prediction results
+        node_results_path = results_path / "downstream_node_results.pt"
+        torch.save(node_results, node_results_path)
+        logger.info(f"Node property prediction results saved to: {node_results_path}")
+
+    # Step 10b: Link prediction
+    if args.downstream_task in ["link", "both"]:
+        # For link prediction, we need edge indices
+        target_edge_type = tuple(args.target_edge_type.split(","))
+
+        # Use edge splits from Step 2 if available, otherwise create new splits
+        logger.info(
+            f"Creating new edge splits for edge type: {target_edge_type}"
+        )
+        logger.warning(
+            "Edge splits not available from Step 2 - creating new splits with same seed"
+        )
+
+        # Get full edge index and use create_edge_splits() function
+        full_edge_index = data[target_edge_type].edge_index
+        train_edge_index, val_edge_index, test_edge_index = create_edge_splits(
+            edge_index=full_edge_index,
+            train_ratio=0.8,
+            val_ratio=0.1,
+            seed=args.seed,
+        )
+        
+        link_results = evaluate_link_prediction(
+            embeddings=global_embeddings,
+            train_edge_index=train_edge_index,
+            val_edge_index=val_edge_index,
+            test_edge_index=test_edge_index,
+            device=device,
+            n_runs=args.downstream_n_runs,
+            num_neg_samples=args.downstream_neg_samples,
+            hidden_dim=args.downstream_hidden_dim,
+            num_layers=args.downstream_num_layers,
+            dropout=args.downstream_dropout,
+            batch_size=args.downstream_batch_size,
+            lr=args.downstream_lr,
+            weight_decay=args.downstream_weight_decay,
+            num_epochs=args.downstream_epochs,
+            early_stopping_patience=args.downstream_patience,
+            max_edges=args.downstream_max_edges,
+            verbose=True
+        )
+
+        # Save link prediction results
+        link_results_path = results_path / "downstream_link_results.pt"
+        torch.save(link_results, link_results_path)
+        logger.info(f"Link prediction results saved to: {link_results_path}")
+

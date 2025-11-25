@@ -87,14 +87,13 @@ def create_neighbor_loaders(
         shuffle=True,
     )
 
-    # Transductive training loader - only sample from training nodes
-    transductive_train_loader = NeighborLoader(
+    # We need global ids
+    global_loader = NeighborLoader(
         data,
         num_neighbors=num_neighbors,
         batch_size=batch_size,
-        input_nodes=(target_node_type, data[target_node_type].train_mask),
+        input_nodes=(target_node_type, torch.arange(data[target_node_type].num_nodes)),
         num_workers=num_workers,
-        shuffle=True,
     )
     
     # Validation loader
@@ -119,11 +118,11 @@ def create_neighbor_loaders(
     
     logger.info("Loaders created successfully!")
     logger.debug(f"  Inductive Train batches: ~{len(inductive_train_loader)}")
-    logger.debug(f"  Train batches: ~{len(transductive_train_loader)}")
+    logger.debug(f"  Global batches: ~{len(global_loader)}")
     logger.debug(f"  Val batches: ~{len(val_loader)}")
     logger.debug(f"  Test batches: ~{len(test_loader)}")
     
-    return inductive_train_loader, transductive_train_loader, val_loader, test_loader
+    return inductive_train_loader, val_loader, test_loader, global_loader
 
 
 def create_link_loaders(
@@ -195,6 +194,16 @@ def create_link_loaders(
         shuffle=True,
         num_workers=num_workers,
     )
+
+    # We need global ids
+    global_loader = LinkNeighborLoader(
+        data,
+        num_neighbors=num_neighbors,
+        edge_label_index=(target_edge_type, edge_index),
+        edge_label=torch.ones(edge_index.size(1)),
+        batch_size=batch_size,
+        num_workers=num_workers,
+    )
     
     # Validation loader with negative sampling
     val_loader = LinkNeighborLoader(
@@ -222,12 +231,13 @@ def create_link_loaders(
     
     logger.info("Link prediction loaders created successfully!")
     logger.debug(f"  Train batches: ~{len(train_loader)}")
+    logger.debug(f"  Global batches: ~{len(global_loader)}")
     logger.debug(f"  Val batches: ~{len(val_loader)}")
     logger.debug(f"  Test batches: ~{len(test_loader)}")
     
     # Return loaders and edge splits for downstream evaluation
     edge_splits = (train_edge_index, val_edge_index, test_edge_index)
-    return train_loader, val_loader, test_loader, edge_splits
+    return train_loader, val_loader, test_loader, global_train_loader, edge_splits
 
 
 def get_dataset_info(data: HeteroData, target_node_type: str = "paper") -> Dict:

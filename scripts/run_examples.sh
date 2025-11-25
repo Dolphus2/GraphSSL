@@ -21,15 +21,18 @@ echo "----------------------------------------------------"
 python -m graphssl.main \
     --data_root data \
     --results_root results/quick_test \
-    --objective_type self_supervised_node \
+    --objective_type supervised_node_classification \
     --loss_fn sce \
-    --hidden_channels 128 \
-    --num_layers 2 \
+    --target_edge_type "paper,cites,paper" \
+    --hidden_channels 2 \
+    --num_layers 1 \
     --batch_size 10240 \
     --epochs 1 \
     --lr 0.001 \
     --patience 5 \
-    --extract_embeddings
+    --downstream_task link \
+    --downstream_eval \
+    --test_mode
 
 # # Example 2: Standard training configuration
 # echo ""
