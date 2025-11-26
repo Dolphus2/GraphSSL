@@ -237,7 +237,7 @@ def create_link_loaders(
     
     # Return loaders and edge splits for downstream evaluation
     edge_splits = (train_edge_index, val_edge_index, test_edge_index)
-    return train_loader, val_loader, test_loader, global_train_loader, edge_splits
+    return train_loader, val_loader, test_loader, global_loader, edge_splits
 
 
 def get_dataset_info(data: HeteroData, target_node_type: str = "paper") -> Dict:
@@ -312,8 +312,10 @@ def create_edge_splits(
 
 def to_inductive(data: HeteroData, node_type: str) -> HeteroData:
     """
-    A function that removes all val/test node features and edges between train nodes and val/test nodes.
-
+    Convert a heterogeneous graph into an inductive view by dropping validation/test
+    nodes and any edges touching them. The original node indices are remapped so the
+    returned graph only contains training nodes, making it safe for inductive loaders.
+    Note: This mutates the provided `data` object (val/test masks become empty).
     """
     train_mask = data[node_type].train_mask
     train_mask_idxs = torch.where(train_mask)[0]

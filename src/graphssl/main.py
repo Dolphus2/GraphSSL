@@ -272,7 +272,7 @@ def run_pipeline(args):
         ) 
         logger.info("Extracting global embeddings...")
         global_embeddings, _ = extract_embeddings(
-            model, global_loader, device, target_node
+            model, global_loader, device, args.target_node
         )
         # Embeddings for inductive and transductive are not equivalent. 
         # Transductive train embeddings contain information about val and test nodes as well 
