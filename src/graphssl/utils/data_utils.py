@@ -53,7 +53,8 @@ def create_neighbor_loaders(
     num_neighbors: list = [30]*2,
     batch_size: int = 1024,
     num_workers: int = 4,
-    target_node_type: str = "paper"
+    target_node_type: str = "paper",
+    seed = 42,
 ) -> Tuple[NeighborLoader, NeighborLoader, NeighborLoader, NeighborLoader]:
     """
     Create train, validation, and test NeighborLoaders for heterogeneous graphs.
@@ -72,36 +73,30 @@ def create_neighbor_loaders(
     logger.debug(f"  Neighbors per layer: {num_neighbors}")
     logger.debug(f"  Batch size: {batch_size}")
     logger.debug(f"  Target node type: {target_node_type}")
-    
+
     # Create inductive train dataset
-    data_inductive = to_inductive(data.clone(), target_node_type)
+    train_data_inductive = to_inductive(data.clone(), target_node_type)
 
     # Inductive training loader - only sample from training nodes with test and val nodes removed
     # Note: data_inductive already has only train nodes, so use its train_mask
     inductive_train_loader = NeighborLoader(
-        data_inductive,
+        train_data_inductive,
         num_neighbors=num_neighbors,
         batch_size=batch_size,
-        input_nodes=(target_node_type, data_inductive[target_node_type].train_mask),
+        input_nodes=(target_node_type, train_data_inductive[target_node_type].train_mask),
         num_workers=num_workers,
         shuffle=True,
     )
-
-    # We need global ids
-    global_loader = NeighborLoader(
-        data,
-        num_neighbors=num_neighbors,
-        batch_size=batch_size,
-        input_nodes=(target_node_type, torch.arange(data[target_node_type].num_nodes)),
-        num_workers=num_workers,
-    )
     
-    # Validation loader
+    # Create inductive train dataset
+    val_data_inductive = val_to_inductive(data.clone(), target_node_type, seed)
+    
+    # Validation loader. # sample from val nodes with connections to test nodes removed.
     val_loader = NeighborLoader(
-        data,
+        val_data_inductive,
         num_neighbors=num_neighbors,
         batch_size=batch_size,
-        input_nodes=(target_node_type, data[target_node_type].val_mask),
+        input_nodes=(target_node_type, val_data_inductive[target_node_type].val_mask),
         num_workers=num_workers,
         shuffle=False,
     )
@@ -114,6 +109,15 @@ def create_neighbor_loaders(
         input_nodes=(target_node_type, data[target_node_type].test_mask),
         num_workers=num_workers,
         shuffle=False,
+    )
+
+    # We need global ids
+    global_loader = NeighborLoader(
+        data,
+        num_neighbors=num_neighbors,
+        batch_size=batch_size,
+        input_nodes=(target_node_type, torch.arange(data[target_node_type].num_nodes)),
+        num_workers=num_workers,
     )
     
     logger.info("Loaders created successfully!")
@@ -132,7 +136,6 @@ def create_link_loaders(
     batch_size: int = 1024,
     neg_sampling_ratio: float = 1.0,
     num_workers: int = 4,
-    split_edges: bool = True,
     seed: int = 42,
     target_node_type: str = "paper"
 ) -> Tuple[LinkNeighborLoader, LinkNeighborLoader, LinkNeighborLoader, NeighborLoader, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
@@ -142,20 +145,15 @@ def create_link_loaders(
     Args:
         data: HeteroData object
         target_edge_type: Edge type tuple (src_type, relation, dst_type) for link prediction
-        num_neighbors: Number of neighbors to sample at each layer [layer1, layer2, ...]
+        num_neighbors: Number of neighbors to sample at each layer
         batch_size: Batch size for loading (number of edges per batch)
-        neg_sampling_ratio: Ratio of negative to positive samples (e.g., 1.0 = 1:1 ratio)
+        neg_sampling_ratio: Ratio of negative to positive samples
         num_workers: Number of worker processes for data loading
-        split_edges: Whether to split edges into train/val/test (80/10/10 split)
         seed: Random seed for reproducible edge splitting
-        target_node_type: Target node type for global_loader (default: "paper")
+        target_node_type: Target node type for global_loader
     
     Returns:
         Tuple of (train_loader, val_loader, test_loader, global_loader, edge_splits)
-        where:
-        - train_loader, val_loader, test_loader are LinkNeighborLoaders
-        - global_loader is a NeighborLoader (ensures all nodes are included)
-        - edge_splits is (train_edge_index, val_edge_index, test_edge_index)
     """
     logger.debug(f"Creating LinkNeighborLoaders with:")
     logger.debug(f"  Target edge type: {target_edge_type}")
@@ -163,56 +161,26 @@ def create_link_loaders(
     logger.debug(f"  Batch size: {batch_size}")
     logger.debug(f"  Negative sampling ratio: {neg_sampling_ratio}")
     
-    # For this, we first split the set of edges into
-    # training (80%), validation (10%), and testing edges (10%).
-    # Across the training edges, we use 70% of edges for message passing,
-    # and 30% of edges for supervision.
+    torch.manual_seed(seed)
     transform = T.RandomLinkSplit(
         num_val=0.1,
         num_test=0.1,
         disjoint_train_ratio=0.3,
-        neg_sampling_ratio=neg_sampling_ratio,
+        neg_sampling_ratio=0.0,
         add_negative_train_samples=False,
         edge_types=target_edge_type,
-        rev_edge_types=("movie", "rev_rates", "user"), 
     )
     train_data, val_data, test_data = transform(data)
-
-    # Get edge indices for target edge type
-    edge_index = data[target_edge_type].edge_index
-    num_edges = edge_index.size(1)
     
-    # Split edges into train/val/test if requested
-    if split_edges:
-        train_edge_index, val_edge_index, test_edge_index = create_edge_splits(
-            edge_index=edge_index,
-            train_ratio=0.8,
-            val_ratio=0.1,
-            seed=seed
-        )
-        logger.info(f"  Edge splits (seed={seed}): train={train_edge_index.size(1)}, "
-                   f"val={val_edge_index.size(1)}, test={test_edge_index.size(1)}")
-    else:
-        # Use all edges for all splits (not recommended for evaluation)
-        train_edge_index = edge_index
-        val_edge_index = edge_index
-        test_edge_index = edge_index
-        logger.warning("Using all edges for train/val/test - this will cause data leakage!")
+    train_edge_index = train_data[target_edge_type].edge_label_index
+    val_edge_index = val_data[target_edge_type].edge_label_index
+    test_edge_index = test_data[target_edge_type].edge_label_index
     
-    # Create data copy with ONLY train edges in the graph structure for the target edge type
-    # This prevents data leakage: message passing will only use train edges
-    # Other edge types remain unchanged as they're not being predicted
-    data_train_only = data.clone()
-    data_train_only[target_edge_type].edge_index = train_edge_index
-    if split_edges:
-        logger.debug(f"Created train-only graph with {train_edge_index.size(1)} edges for message passing "
-                    f"(removed {val_edge_index.size(1) + test_edge_index.size(1)} val/test edges)")
-    else:
-        logger.debug(f"Using all {train_edge_index.size(1)} edges for message passing (split_edges=False)")
+    logger.info(f"  Edge splits (seed={seed}): train={train_edge_index.size(1)}, "
+               f"val={val_edge_index.size(1)}, test={test_edge_index.size(1)}")
     
-    # Train loader with negative sampling - uses train edges only for message passing
     train_loader = LinkNeighborLoader(
-        data_train_only,  # Use filtered data with only train edges
+        train_data,
         num_neighbors=num_neighbors,
         edge_label_index=(target_edge_type, train_edge_index),
         edge_label=torch.ones(train_edge_index.size(1)),
@@ -222,21 +190,16 @@ def create_link_loaders(
         num_workers=num_workers,
     )
 
-    # We need global ids - use NeighborLoader to ensure ALL nodes are included
-    # This is important for downstream evaluation which needs embeddings for all nodes
-    # CRITICAL: Use train edges only for message passing to avoid data leakage
     global_loader = NeighborLoader(
-        data_train_only,  # Use filtered data with only train edges
+        train_data,
         num_neighbors=num_neighbors,
         batch_size=batch_size,
         input_nodes=(target_node_type, torch.arange(data[target_node_type].num_nodes)),
         num_workers=num_workers,
     )
     
-    # Validation loader with negative sampling
-    # Uses train edges for message passing, but evaluates on val edges
     val_loader = LinkNeighborLoader(
-        data_train_only,  # Use filtered data with only train edges for message passing
+        train_data,
         num_neighbors=num_neighbors,
         edge_label_index=(target_edge_type, val_edge_index),
         edge_label=torch.ones(val_edge_index.size(1)),
@@ -246,10 +209,8 @@ def create_link_loaders(
         num_workers=num_workers,
     )
     
-    # Test loader with negative sampling
-    # Uses train edges for message passing, but evaluates on test edges
     test_loader = LinkNeighborLoader(
-        data_train_only,  # Use filtered data with only train edges for message passing
+        train_data,
         num_neighbors=num_neighbors,
         edge_label_index=(target_edge_type, test_edge_index),
         edge_label=torch.ones(test_edge_index.size(1)),
@@ -265,7 +226,6 @@ def create_link_loaders(
     logger.debug(f"  Val batches: ~{len(val_loader)}")
     logger.debug(f"  Test batches: ~{len(test_loader)}")
     
-    # Return loaders and edge splits for downstream evaluation
     edge_splits = (train_edge_index, val_edge_index, test_edge_index)
     return train_loader, val_loader, test_loader, global_loader, edge_splits
 

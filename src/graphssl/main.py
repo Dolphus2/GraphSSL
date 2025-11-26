@@ -127,7 +127,8 @@ def run_pipeline(args):
             num_neighbors=args.num_neighbors,
             batch_size=args.batch_size,
             num_workers=args.num_workers,
-            target_node_type=args.target_node
+            target_node_type=args.target_node,
+            seed=args.seed,
         )
     
     # ==================== Step 3: Create Training Objective ====================
