@@ -26,10 +26,11 @@ python -m graphssl.main \
     --target_edge_type "paper,cites,paper" \
     --hidden_channels 2 \
     --num_layers 1 \
-    --batch_size 10240 \
+    --batch_size 1024 \
     --epochs 1 \
     --lr 0.001 \
     --patience 5 \
+    --extract_embeddings \
     --downstream_task link \
     --downstream_eval \
     --test_mode

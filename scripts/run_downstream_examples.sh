@@ -18,7 +18,7 @@ python -m graphssl.downstream_evaluation \
     --target_edge_type "paper,cites,paper" \
     --downstream_lr 0.001 \
     --downstream_patience 5 \
-    --downstream_task link \
+    --downstream_task both \
     --downstream_n_runs 5 \
     --downstream_hidden_dim 128 \
     --downstream_num_layers 1 \
