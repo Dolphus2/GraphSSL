@@ -184,13 +184,20 @@ def create_link_loaders(
         test_edge_index = edge_index
         logger.warning("Using all edges for train/val/test - this will cause data leakage!")
     
-    # Create data copies for each split to avoid edge leakage
-    # For proper evaluation, we should use only train edges in the graph
-    data_train = data.clone()
+    # Create data copy with ONLY train edges in the graph structure for the target edge type
+    # This prevents data leakage: message passing will only use train edges
+    # Other edge types remain unchanged as they're not being predicted
+    data_train_only = data.clone()
+    data_train_only[target_edge_type].edge_index = train_edge_index
+    if split_edges:
+        logger.debug(f"Created train-only graph with {train_edge_index.size(1)} edges for message passing "
+                    f"(removed {val_edge_index.size(1) + test_edge_index.size(1)} val/test edges)")
+    else:
+        logger.debug(f"Using all {train_edge_index.size(1)} edges for message passing (split_edges=False)")
     
-    # Train loader with negative sampling
+    # Train loader with negative sampling - uses train edges only for message passing
     train_loader = LinkNeighborLoader(
-        data_train,
+        data_train_only,  # Use filtered data with only train edges
         num_neighbors=num_neighbors,
         edge_label_index=(target_edge_type, train_edge_index),
         edge_label=torch.ones(train_edge_index.size(1)),
@@ -202,8 +209,9 @@ def create_link_loaders(
 
     # We need global ids - use NeighborLoader to ensure ALL nodes are included
     # This is important for downstream evaluation which needs embeddings for all nodes
+    # CRITICAL: Use train edges only for message passing to avoid data leakage
     global_loader = NeighborLoader(
-        data,
+        data_train_only,  # Use filtered data with only train edges
         num_neighbors=num_neighbors,
         batch_size=batch_size,
         input_nodes=(target_node_type, torch.arange(data[target_node_type].num_nodes)),
@@ -211,8 +219,9 @@ def create_link_loaders(
     )
     
     # Validation loader with negative sampling
+    # Uses train edges for message passing, but evaluates on val edges
     val_loader = LinkNeighborLoader(
-        data,
+        data_train_only,  # Use filtered data with only train edges for message passing
         num_neighbors=num_neighbors,
         edge_label_index=(target_edge_type, val_edge_index),
         edge_label=torch.ones(val_edge_index.size(1)),
@@ -223,8 +232,9 @@ def create_link_loaders(
     )
     
     # Test loader with negative sampling
+    # Uses train edges for message passing, but evaluates on test edges
     test_loader = LinkNeighborLoader(
-        data,
+        data_train_only,  # Use filtered data with only train edges for message passing
         num_neighbors=num_neighbors,
         edge_label_index=(target_edge_type, test_edge_index),
         edge_label=torch.ones(test_edge_index.size(1)),
