@@ -655,7 +655,7 @@ def cli():
         "--num_neighbors",
         type=int,
         nargs="+",
-        default=[30]*2,
+        default=[15, 10],
         help="Number of neighbors to sample at each layer"
     )
     parser.add_argument(
