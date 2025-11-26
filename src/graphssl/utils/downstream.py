@@ -466,8 +466,9 @@ def create_link_index_data(
         all_edges:  [2, N] sampled edges (pos + neg)
         all_labels: [N]   labels (1 for pos, 0 for neg)
     """
-    if device is None:
-        device = edge_index.device
+    
+    # Ensure edge_index is on the correct device
+    edge_index = edge_index.to(device)
 
     torch.manual_seed(seed)
 

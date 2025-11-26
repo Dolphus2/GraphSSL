@@ -271,24 +271,50 @@ class SelfSupervisedEdgeReconstruction(TrainingObjective):
     """
     Self-supervised edge reconstruction objective.
     Reconstructs masked edges from node embeddings (link prediction as pretext task).
+    Supports multiple loss functions including HGMAE's combined loss (MER + TAR + PFP).
     """
     
     def __init__(
         self,
         target_edge_type: Tuple[str, str, str],
         negative_sampling_ratio: float = 1.0,
-        decoder: Optional[torch.nn.Module] = None
+        decoder: Optional[torch.nn.Module] = None,
+        loss_fn: str = "bce",
+        mer_weight: float = 1.0,
+        tar_weight: float = 1.0,
+        pfp_weight: float = 1.0,
+        tar_temperature: float = 0.5
     ):
         """
         Args:
             target_edge_type: Edge type to reconstruct (src_type, relation, dst_type)
             negative_sampling_ratio: Ratio of negative to positive samples
             decoder: Optional edge decoder module (if None, uses dot product)
+            loss_fn: Loss function to use. Options:
+                - "bce": Binary cross-entropy (default)
+                - "mer": Masked Edge Reconstruction
+                - "tar": Topology-Aware Reconstruction
+                - "pfp": Preference-based Feature Propagation
+                - "combined_loss": Combined loss (MER + TAR + PFP)
+            mer_weight: Weight for MER loss in combined loss (default: 1.0)
+            tar_weight: Weight for TAR loss in combined loss (default: 1.0)
+            pfp_weight: Weight for PFP loss in combined loss (default: 1.0)
+            tar_temperature: Temperature parameter for TAR loss (default: 0.5)
         """
         super().__init__(target_node_type=target_edge_type[0])
         self.target_edge_type = target_edge_type
         self.negative_sampling_ratio = negative_sampling_ratio
         self.decoder = decoder
+        self.loss_fn = loss_fn
+        self.mer_weight = mer_weight
+        self.tar_weight = tar_weight
+        self.pfp_weight = pfp_weight
+        self.tar_temperature = tar_temperature
+        
+        # Validate loss function
+        valid_loss_fns = ["bce", "mer", "tar", "pfp", "combined_loss"]
+        if loss_fn not in valid_loss_fns:
+            raise ValueError(f"Invalid loss_fn '{loss_fn}'. Must be one of {valid_loss_fns}")
     
     def step(
         self,
@@ -322,6 +348,10 @@ class SelfSupervisedEdgeReconstruction(TrainingObjective):
         src_embeddings = embeddings_dict[src_type][edge_label_index[0]]
         dst_embeddings = embeddings_dict[dst_type][edge_label_index[1]]
         
+        # Get original features for PFP loss
+        src_features = batch.x_dict[src_type][edge_label_index[0]]
+        dst_features = batch.x_dict[dst_type][edge_label_index[1]]
+        
         # Decode edge scores
         if self.decoder is not None:
             edge_scores = self.decoder(src_embeddings, dst_embeddings).squeeze()
@@ -329,25 +359,65 @@ class SelfSupervisedEdgeReconstruction(TrainingObjective):
             # Default: dot product similarity
             edge_scores = (src_embeddings * dst_embeddings).sum(dim=-1)
         
-        # Compute binary cross-entropy loss
-        loss = F.binary_cross_entropy_with_logits(edge_scores, edge_label.float())
+        # Compute loss based on loss_fn
+        metrics = {}
+        
+        if self.loss_fn == "bce":
+            # Standard binary cross-entropy loss
+            loss = F.binary_cross_entropy_with_logits(edge_scores, edge_label.float())
+            metrics["bce"] = loss.item()
+            
+        elif self.loss_fn == "mer":
+            # Masked Edge Reconstruction loss
+            loss = mer_loss(edge_scores, edge_label)
+            metrics["mer"] = loss.item()
+            
+        elif self.loss_fn == "tar":
+            # Topology-Aware Reconstruction loss
+            loss = tar_loss(src_embeddings, dst_embeddings, edge_label, 
+                          temperature=self.tar_temperature)
+            metrics["tar"] = loss.item()
+            
+        elif self.loss_fn == "pfp":
+            # Preference-based Feature Propagation loss
+            loss = pfp_loss(src_features, dst_features, edge_label)
+            metrics["pfp"] = loss.item()
+            
+        elif self.loss_fn == "combined_loss":
+            # Combined loss (MER + TAR + PFP)
+            mer = mer_loss(edge_scores, edge_label)
+            tar = tar_loss(src_embeddings, dst_embeddings, edge_label,
+                         temperature=self.tar_temperature)
+            pfp = pfp_loss(src_features, dst_features, edge_label)
+            
+            loss = (self.mer_weight * mer + 
+                   self.tar_weight * tar + 
+                   self.pfp_weight * pfp)
+            
+            metrics["mer"] = mer.item()
+            metrics["tar"] = tar.item()
+            metrics["pfp"] = pfp.item()
+            metrics["combined_loss_total"] = loss.item()
+        else:
+            raise ValueError(f"Unknown loss function: {self.loss_fn}")
         
         # Compute accuracy
         pred = (edge_scores > 0).float()
         correct = int((pred == edge_label).sum())
         accuracy = correct / edge_label.size(0)
         
-        metrics = {
-            "loss": loss.item(),
-            "acc": accuracy,
-            "correct": correct,
-            "total": edge_label.size(0)
-        }
+        metrics["loss"] = loss.item()
+        metrics["acc"] = accuracy
+        metrics["correct"] = correct
+        metrics["total"] = edge_label.size(0)
         
         return loss, metrics
     
     def get_metric_names(self) -> list:
-        return ["loss", "acc"]
+        if self.loss_fn == "combined_loss":
+            return ["loss", "acc", "mer", "tar", "pfp", "combined_loss_total"]
+        else:
+            return ["loss", "acc", self.loss_fn]
 
 
 class EdgeDecoder(torch.nn.Module):
@@ -407,6 +477,17 @@ class FeatureDecoder(torch.nn.Module):
         return self.decoder(embeddings)
 
 def sce_loss(x, y, alpha=3):
+    """
+    Scaled Cosine Error loss from GraphMAE.
+    
+    Args:
+        x: Reconstructed features [num_nodes, feature_dim]
+        y: Target features [num_nodes, feature_dim]
+        alpha: Scaling factor (default: 3)
+    
+    Returns:
+        Scalar loss value
+    """
     x = F.normalize(x, p=2, dim=-1)
     y = F.normalize(y, p=2, dim=-1)
 
@@ -416,5 +497,119 @@ def sce_loss(x, y, alpha=3):
     loss = (1 - (x * y).sum(dim=-1)).pow_(alpha)
 
     loss = loss.mean()
+    return loss
+
+
+def mer_loss(edge_scores, edge_labels, mask=None):
+    """
+    Masked Edge Reconstruction (MER) loss from HGMAE.
+    
+    Binary cross-entropy loss for edge reconstruction with optional masking.
+    
+    Args:
+        edge_scores: Predicted edge scores [num_edges]
+        edge_labels: Ground truth edge labels [num_edges]
+        mask: Optional mask for selecting specific edges [num_edges]
+    
+    Returns:
+        Scalar loss value
+    """
+    loss = F.binary_cross_entropy_with_logits(edge_scores, edge_labels.float(), reduction='none')
+    if mask is not None:
+        loss = loss * mask
+        loss = loss.sum() / (mask.sum() + 1e-8)
+    else:
+        loss = loss.mean()
+    return loss
+
+
+def tar_loss(src_embeddings, dst_embeddings, edge_labels, temperature=0.5):
+    """
+    Topology-Aware Reconstruction (TAR) loss from HGMAE.
+    
+    Contrastive loss that encourages connected nodes to have similar embeddings
+    while pushing disconnected nodes apart.
+    
+    Args:
+        src_embeddings: Source node embeddings [num_edges, hidden_dim]
+        dst_embeddings: Destination node embeddings [num_edges, hidden_dim]
+        edge_labels: Binary edge labels (1 for positive, 0 for negative) [num_edges]
+        temperature: Temperature parameter for contrastive learning
+    
+    Returns:
+        Scalar loss value
+    """
+    # Normalize embeddings
+    src_embeddings = F.normalize(src_embeddings, p=2, dim=-1)
+    dst_embeddings = F.normalize(dst_embeddings, p=2, dim=-1)
+    
+    # Compute cosine similarity
+    similarity = (src_embeddings * dst_embeddings).sum(dim=-1) / temperature
+    
+    # Positive pairs: maximize similarity (minimize negative log-likelihood)
+    # Negative pairs: minimize similarity (maximize negative log-likelihood)
+    pos_mask = edge_labels == 1
+    neg_mask = edge_labels == 0
+    
+    loss = 0.0
+    if pos_mask.sum() > 0:
+        pos_sim = similarity[pos_mask]
+        # For positive pairs, we want high similarity
+        pos_loss = -torch.log(torch.sigmoid(pos_sim) + 1e-8).mean()
+        loss += pos_loss
+    
+    if neg_mask.sum() > 0:
+        neg_sim = similarity[neg_mask]
+        # For negative pairs, we want low similarity
+        neg_loss = -torch.log(1 - torch.sigmoid(neg_sim) + 1e-8).mean()
+        loss += neg_loss
+    
+    return loss
+
+
+def pfp_loss(src_features, dst_features, edge_labels, reconstructed_src=None, reconstructed_dst=None):
+    """
+    Preference-based Feature Propagation (PFP) loss from HGMAE.
+    
+    Encourages the model to preserve feature similarity between connected nodes.
+    If reconstructed features are provided, uses them; otherwise uses original features.
+    
+    Args:
+        src_features: Source node features [num_edges, feature_dim]
+        dst_features: Destination node features [num_edges, feature_dim]
+        edge_labels: Binary edge labels (1 for positive, 0 for negative) [num_edges]
+        reconstructed_src: Optional reconstructed source features [num_edges, feature_dim]
+        reconstructed_dst: Optional reconstructed destination features [num_edges, feature_dim]
+    
+    Returns:
+        Scalar loss value
+    """
+    # Use reconstructed features if available, otherwise use original
+    if reconstructed_src is not None and reconstructed_dst is not None:
+        src_to_use = reconstructed_src
+        dst_to_use = reconstructed_dst
+    else:
+        src_to_use = src_features
+        dst_to_use = dst_features
+    
+    # Normalize features
+    src_norm = F.normalize(src_to_use, p=2, dim=-1)
+    dst_norm = F.normalize(dst_to_use, p=2, dim=-1)
+    
+    # Compute feature similarity
+    feature_sim = (src_norm * dst_norm).sum(dim=-1)
+    
+    # For positive edges, maximize feature similarity
+    # For negative edges, this term should be small
+    pos_mask = edge_labels == 1
+    
+    if pos_mask.sum() > 0:
+        # For positive edges, minimize 1 - similarity (maximize similarity)
+        pos_feature_sim = feature_sim[pos_mask]
+        loss = (1 - pos_feature_sim).mean()
+    else:
+        # No positive edges - return zero tensor
+        loss = torch.tensor(0.0, device=src_features.device, dtype=src_features.dtype)
+    
     return loss
     

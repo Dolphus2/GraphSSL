@@ -133,8 +133,9 @@ def create_link_loaders(
     neg_sampling_ratio: float = 1.0,
     num_workers: int = 4,
     split_edges: bool = True,
-    seed: int = 42
-) -> Tuple[LinkNeighborLoader, LinkNeighborLoader, LinkNeighborLoader, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    seed: int = 42,
+    target_node_type: str = "paper"
+) -> Tuple[LinkNeighborLoader, LinkNeighborLoader, LinkNeighborLoader, NeighborLoader, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """
     Create train, validation, and test LinkNeighborLoaders for link prediction.
     
@@ -147,10 +148,14 @@ def create_link_loaders(
         num_workers: Number of worker processes for data loading
         split_edges: Whether to split edges into train/val/test (80/10/10 split)
         seed: Random seed for reproducible edge splitting
+        target_node_type: Target node type for global_loader (default: "paper")
     
     Returns:
-        Tuple of (train_loader, val_loader, test_loader, edge_splits)
-        where edge_splits is (train_edge_index, val_edge_index, test_edge_index)
+        Tuple of (train_loader, val_loader, test_loader, global_loader, edge_splits)
+        where:
+        - train_loader, val_loader, test_loader are LinkNeighborLoaders
+        - global_loader is a NeighborLoader (ensures all nodes are included)
+        - edge_splits is (train_edge_index, val_edge_index, test_edge_index)
     """
     logger.debug(f"Creating LinkNeighborLoaders with:")
     logger.debug(f"  Target edge type: {target_edge_type}")
@@ -195,13 +200,13 @@ def create_link_loaders(
         num_workers=num_workers,
     )
 
-    # We need global ids
-    global_loader = LinkNeighborLoader(
+    # We need global ids - use NeighborLoader to ensure ALL nodes are included
+    # This is important for downstream evaluation which needs embeddings for all nodes
+    global_loader = NeighborLoader(
         data,
         num_neighbors=num_neighbors,
-        edge_label_index=(target_edge_type, edge_index),
-        edge_label=torch.ones(edge_index.size(1)),
         batch_size=batch_size,
+        input_nodes=(target_node_type, torch.arange(data[target_node_type].num_nodes)),
         num_workers=num_workers,
     )
     
@@ -308,6 +313,104 @@ def create_edge_splits(
                 f"test={test_edge_index.size(1)}")
     
     return train_edge_index, val_edge_index, test_edge_index
+
+
+def subsample_dataset(
+    data: HeteroData,
+    target_node_type: str = "paper",
+    max_nodes: int = 5000,
+    seed: int = 42
+) -> HeteroData:
+    """
+    Subsample a heterogeneous graph dataset for faster testing.
+    
+    This function randomly samples a subset of nodes and keeps only edges
+    between sampled nodes. Useful for quick testing on large datasets.
+    
+    Args:
+        data: HeteroData object to subsample
+        target_node_type: The main node type to subsample (e.g., "paper")
+        max_nodes: Maximum number of nodes to keep for target_node_type
+        seed: Random seed for reproducible subsampling
+    
+    Returns:
+        Subsampled HeteroData object
+    """
+    logger.info(f"Subsampling dataset: keeping max {max_nodes} {target_node_type} nodes")
+    logger.info(f"Original {target_node_type} nodes: {data[target_node_type].num_nodes}")
+    
+    num_nodes = data[target_node_type].num_nodes
+    if num_nodes <= max_nodes:
+        logger.info(f"Dataset already small enough, skipping subsampling")
+        return data
+    
+    # Set random seed
+    torch.manual_seed(seed)
+    
+    # Sample node indices
+    perm = torch.randperm(num_nodes, generator=torch.Generator().manual_seed(seed))
+    sampled_indices = perm[:max_nodes].sort()[0]  # Sort to maintain some structure
+    
+    # Create mapping from old indices to new indices
+    node_mapping = torch.full((num_nodes,), -1, dtype=torch.long, device=sampled_indices.device)
+    node_mapping[sampled_indices] = torch.arange(max_nodes, device=sampled_indices.device)
+    
+    # Create new data object
+    data_sampled = data.clone()
+    
+    # Subsample target node type
+    data_sampled[target_node_type].x = data[target_node_type].x[sampled_indices]
+    if hasattr(data[target_node_type], 'y') and data[target_node_type].y is not None:
+        data_sampled[target_node_type].y = data[target_node_type].y[sampled_indices]
+    if hasattr(data[target_node_type], 'train_mask') and data[target_node_type].train_mask is not None:
+        data_sampled[target_node_type].train_mask = data[target_node_type].train_mask[sampled_indices]
+    if hasattr(data[target_node_type], 'val_mask') and data[target_node_type].val_mask is not None:
+        data_sampled[target_node_type].val_mask = data[target_node_type].val_mask[sampled_indices]
+    if hasattr(data[target_node_type], 'test_mask') and data[target_node_type].test_mask is not None:
+        data_sampled[target_node_type].test_mask = data[target_node_type].test_mask[sampled_indices]
+    if hasattr(data[target_node_type], 'year') and data[target_node_type].year is not None:
+        data_sampled[target_node_type].year = data[target_node_type].year[sampled_indices]
+    
+    # Filter edges to only include sampled nodes
+    edge_types = list(data.edge_index_dict.keys())
+    for edge_type in edge_types:
+        edge_index = data[edge_type].edge_index
+        
+        # Check if this edge type involves the target node type
+        if edge_type[0] == target_node_type or edge_type[-1] == target_node_type:
+            # Ensure node_mapping is on the same device as edge_index
+            node_mapping_on_device = node_mapping.to(edge_index.device)
+            
+            # Create masks for valid edges
+            if edge_type[0] == target_node_type:
+                src_mask = node_mapping_on_device[edge_index[0]] != -1
+            else:
+                src_mask = torch.ones(edge_index.size(1), dtype=torch.bool, device=edge_index.device)
+            
+            if edge_type[-1] == target_node_type:
+                dst_mask = node_mapping_on_device[edge_index[1]] != -1
+            else:
+                dst_mask = torch.ones(edge_index.size(1), dtype=torch.bool, device=edge_index.device)
+            
+            edge_mask = src_mask & dst_mask
+            filtered_edge_index = edge_index[:, edge_mask]
+            
+            # Remap node indices
+            if edge_type[0] == target_node_type:
+                filtered_edge_index[0] = node_mapping_on_device[filtered_edge_index[0]]
+            if edge_type[-1] == target_node_type:
+                filtered_edge_index[1] = node_mapping_on_device[filtered_edge_index[1]]
+            
+            data_sampled[edge_type].edge_index = filtered_edge_index
+        # For edge types not involving target_node_type, keep all edges
+        # (This is a simplification - in practice you might want to subsample other node types too)
+    
+    logger.info(f"Subsampled {target_node_type} nodes: {data_sampled[target_node_type].num_nodes}")
+    logger.info(f"Train samples: {data_sampled[target_node_type].train_mask.sum().item()}")
+    logger.info(f"Val samples: {data_sampled[target_node_type].val_mask.sum().item()}")
+    logger.info(f"Test samples: {data_sampled[target_node_type].test_mask.sum().item()}")
+    
+    return data_sampled
 
 
 def to_inductive(data: HeteroData, node_type: str) -> HeteroData:

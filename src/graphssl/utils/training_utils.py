@@ -403,6 +403,9 @@ def extract_embeddings(
     
     embeddings_list = []
     labels_list = [] if return_labels else None
+    seen_node_ids = set()  # Track seen nodes for LinkNeighborLoader deduplication
+    node_id_to_embedding = {}  # Map node IDs to embeddings
+    node_id_to_label = {}  # Map node IDs to labels
     
     for batch in tqdm(loader, desc="Extracting embeddings", leave=False):
         batch = batch.to(device)
@@ -411,16 +414,43 @@ def extract_embeddings(
         out_dict, embeddings_dict = model(batch.x_dict, batch.edge_index_dict)
         
         # Get target nodes
-        batch_size = batch[target_node_type].batch_size
-        embeddings = embeddings_dict[target_node_type][:batch_size]  # Keep only target nodes, not context nodes
-        
-        embeddings_list.append(embeddings.cpu())
-        
-        if return_labels and labels_list is not None and hasattr(batch[target_node_type], 'y'):
-            y = batch[target_node_type].y[:batch_size]
-            labels_list.append(y.cpu())
+        # For NeighborLoader, use batch_size attribute
+        # For LinkNeighborLoader, extract all nodes and deduplicate by node ID
+        if hasattr(batch[target_node_type], 'batch_size'):
+            # NeighborLoader: extract only target nodes (not context nodes)
+            batch_size = batch[target_node_type].batch_size
+            embeddings = embeddings_dict[target_node_type][:batch_size]
+            embeddings_list.append(embeddings.cpu())
+            
+            if return_labels and labels_list is not None and hasattr(batch[target_node_type], 'y'):
+                y = batch[target_node_type].y[:batch_size]
+                labels_list.append(y.cpu())
+        else:
+            # LinkNeighborLoader: extract all nodes and deduplicate
+            # Get node IDs from the batch
+            node_ids = batch[target_node_type].n_id if hasattr(batch[target_node_type], 'n_id') else None
+            embeddings = embeddings_dict[target_node_type]
+            
+            if node_ids is not None:
+                # Deduplicate by node ID
+                for i, node_id in enumerate(node_ids.cpu().numpy()):
+                    if node_id not in seen_node_ids:
+                        seen_node_ids.add(node_id)
+                        node_id_to_embedding[node_id] = embeddings[i].cpu()
+                        if return_labels and hasattr(batch[target_node_type], 'y'):
+                            node_id_to_label[node_id] = batch[target_node_type].y[i].cpu()
+            else:
+                raise ValueError("node_ids is required for LinkNeighborLoader")
     
-    embeddings = torch.cat(embeddings_list, dim=0)
-    labels = torch.cat(labels_list, dim=0) if return_labels and labels_list else None
+    # Combine results
+    if seen_node_ids:
+        # LinkNeighborLoader with deduplication
+        sorted_node_ids = sorted(seen_node_ids)
+        embeddings = torch.stack([node_id_to_embedding[nid] for nid in sorted_node_ids])
+        labels = torch.stack([node_id_to_label[nid] for nid in sorted_node_ids]) if return_labels and node_id_to_label else None
+    else:
+        # NeighborLoader or LinkNeighborLoader without node IDs
+        embeddings = torch.cat(embeddings_list, dim=0)
+        labels = torch.cat(labels_list, dim=0) if return_labels and labels_list else None
     
     return embeddings, labels

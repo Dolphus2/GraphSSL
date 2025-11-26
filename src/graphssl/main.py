@@ -11,7 +11,7 @@ import wandb
 import time
 from pathlib import Path
 
-from graphssl.utils.data_utils import load_ogb_mag, create_neighbor_loaders, create_link_loaders, get_dataset_info, create_edge_splits
+from graphssl.utils.data_utils import load_ogb_mag, create_neighbor_loaders, create_link_loaders, get_dataset_info, create_edge_splits, subsample_dataset
 from graphssl.utils.models import create_model
 from graphssl.utils.training_utils import train_model, test_model, extract_embeddings
 from graphssl.utils.objective_utils import (
@@ -64,6 +64,16 @@ def run_pipeline(args):
         preprocess=args.preprocess
     )
     
+    # Subsample dataset in test mode for faster testing
+    if args.test_mode:
+        logger.info("Test mode: subsampling dataset for faster testing")
+        data = subsample_dataset(
+            data,
+            target_node_type=args.target_node,
+            max_nodes=5000,  # Keep only 5000 nodes for quick testing
+            seed=args.seed
+        )
+    
     # Get dataset information
     dataset_info = get_dataset_info(data, target_node_type=args.target_node)
     logger.debug(f"Dataset Information:")
@@ -76,6 +86,21 @@ def run_pipeline(args):
     print("\n" + "="*80)
     print("Step 2: Creating Data Loaders")
     print("="*80)
+    
+    # Apply test mode optimizations
+    if args.test_mode:
+        # Reduce neighbor sampling for faster testing
+        if args.num_neighbors == [30]*2:  # Only override if using defaults
+            args.num_neighbors = [10, 5]  # Much fewer neighbors
+            logger.info(f"Test mode: reducing num_neighbors to {args.num_neighbors}")
+        # Reduce downstream runs
+        if args.downstream_n_runs > 1:
+            args.downstream_n_runs = 1
+            logger.info(f"Test mode: reducing downstream_n_runs to 1")
+        # Reduce downstream epochs
+        if args.downstream_epochs > 3:
+            args.downstream_epochs = 3
+            logger.info(f"Test mode: reducing downstream_epochs to 3")
     
     # Initialize edge_splits as None (will be populated for link prediction tasks)
     edge_splits = None
@@ -90,7 +115,8 @@ def run_pipeline(args):
             neg_sampling_ratio=args.neg_sampling_ratio,
             num_workers=args.num_workers,
             split_edges=True,
-            seed=args.seed
+            seed=args.seed,
+            target_node_type=args.target_node
         )
         inductive_train_loader = train_loader # Just reuse the name
         logger.info(f"Edge splits stored for downstream evaluation (seed={args.seed})")
@@ -156,10 +182,19 @@ def run_pipeline(args):
         objective = SelfSupervisedEdgeReconstruction(
             target_edge_type=target_edge_type,
             negative_sampling_ratio=args.neg_sampling_ratio,
-            decoder=decoder
+            decoder=decoder,
+            loss_fn=args.loss_fn,
+            mer_weight=args.mer_weight,
+            tar_weight=args.tar_weight,
+            pfp_weight=args.pfp_weight,
+            tar_temperature=args.tar_temperature
         )
         logger.info(f"Objective: Self-Supervised Edge Reconstruction on '{target_edge_type}'")
+        logger.info(f"  Loss function: {args.loss_fn}")
         logger.info(f"  Negative sampling ratio: {args.neg_sampling_ratio}")
+        if args.loss_fn == "combined_loss":
+            logger.info(f"  Combined loss weights - MER: {args.mer_weight}, TAR: {args.tar_weight}, PFP: {args.pfp_weight}")
+            logger.info(f"  TAR temperature: {args.tar_temperature}")
     
     else:
         raise ValueError(f"Unknown objective type: {args.objective_type}")
@@ -357,84 +392,88 @@ def run_pipeline(args):
         if train_labels is None or val_labels is None or test_labels is None:
             raise ValueError("Labels are required for downstream evaluation but were not found in embeddings")
         
-        # Step 10a: Node Property Prediction
-        if args.downstream_task in ["node", "both"]:
-            node_results = evaluate_node_property_prediction(
-                train_embeddings=train_embeddings,
-                train_labels=train_labels,
-                val_embeddings=val_embeddings,
-                val_labels=val_labels,
-                test_embeddings=test_embeddings,
-                test_labels=test_labels,
-                num_classes=dataset_info['num_classes'],
-                device=device,
-                n_runs=args.downstream_n_runs,
-                hidden_dim=args.downstream_hidden_dim,
-                num_layers=args.downstream_num_layers,
-                dropout=args.downstream_dropout,
-                batch_size=args.downstream_batch_size,
-                lr=args.downstream_lr,
-                weight_decay=args.downstream_weight_decay,
-                num_epochs=args.downstream_epochs,
-                early_stopping_patience=args.downstream_patience,
-                verbose=True
-            )
-            
-            # Save node prediction results
-            node_results_path = results_path / "downstream_node_results.pt"
-            torch.save(node_results, node_results_path)
-            logger.info(f"Node property prediction results saved to: {node_results_path}")
-        
-        # Step 10b: Link Prediction
-        if args.downstream_task in ["link", "both"]:
-            # For link prediction, we need edge indices
-            target_edge_type = tuple(args.target_edge_type.split(","))
-            
-            # Use edge splits from Step 2 if available, otherwise create new splits
-            if edge_splits is not None:
-                logger.info(f"Using edge splits from Step 2 for edge type: {target_edge_type}")
-                train_edge_index, val_edge_index, test_edge_index = edge_splits
-            else:
-                logger.info(f"Creating new edge splits for edge type: {target_edge_type}")
-                logger.warning("Edge splits not available from Step 2 - creating new splits with same seed")
-                
-                # Get full edge index and use create_edge_splits() function
-                full_edge_index = data[target_edge_type].edge_index
-                train_edge_index, val_edge_index, test_edge_index = create_edge_splits(
-                    edge_index=full_edge_index,
-                    train_ratio=0.8,
-                    val_ratio=0.1,
-                    seed=args.seed
+        # Skip downstream evaluation if requested
+        if args.skip_downstream:
+            logger.info("Skipping downstream evaluation (--skip_downstream flag set)")
+        else:
+            # Step 10a: Node Property Prediction
+            if args.downstream_task in ["node", "both"]:
+                node_results = evaluate_node_property_prediction(
+                    train_embeddings=train_embeddings,
+                    train_labels=train_labels,
+                    val_embeddings=val_embeddings,
+                    val_labels=val_labels,
+                    test_embeddings=test_embeddings,
+                    test_labels=test_labels,
+                    num_classes=dataset_info['num_classes'],
+                    device=device,
+                    n_runs=args.downstream_n_runs,
+                    hidden_dim=args.downstream_hidden_dim,
+                    num_layers=args.downstream_num_layers,
+                    dropout=args.downstream_dropout,
+                    batch_size=args.downstream_batch_size,
+                    lr=args.downstream_lr,
+                    weight_decay=args.downstream_weight_decay,
+                    num_epochs=args.downstream_epochs,
+                    early_stopping_patience=args.downstream_patience,
+                    verbose=True
                 )
-            max_edges = None
-            if args.test_mode:
-                # In test mode, limit the number of edges for quick evaluation
-                max_edges = 2000
-                logger.info(f"Test mode enabled - limiting to max_edges={max_edges} for link prediction")
-            link_results = evaluate_link_prediction(
-                embeddings=global_embeddings,
-                train_edge_index=train_edge_index,
-                val_edge_index=val_edge_index,
-                test_edge_index=test_edge_index,
-                device=device,
-                n_runs=args.downstream_n_runs,
-                num_neg_samples=args.downstream_neg_samples,
-                hidden_dim=args.downstream_hidden_dim,
-                num_layers=args.downstream_num_layers,
-                dropout=args.downstream_dropout,
-                batch_size=args.downstream_batch_size,
-                lr=args.downstream_lr,
-                weight_decay=args.downstream_weight_decay,
-                num_epochs=args.downstream_epochs,
-                early_stopping_patience=args.downstream_patience,
-                max_edges=max_edges,
-                verbose=True
-            )
+                
+                # Save node prediction results
+                node_results_path = results_path / "downstream_node_results.pt"
+                torch.save(node_results, node_results_path)
+                logger.info(f"Node property prediction results saved to: {node_results_path}")
             
-            # Save link prediction results
-            link_results_path = results_path / "downstream_link_results.pt"
-            torch.save(link_results, link_results_path)
-            logger.info(f"Link prediction results saved to: {link_results_path}")
+            # Step 10b: Link Prediction
+            if args.downstream_task in ["link", "both"]:
+                # For link prediction, we need edge indices
+                target_edge_type = tuple(args.target_edge_type.split(","))
+                
+                # Use edge splits from Step 2 if available, otherwise create new splits
+                if edge_splits is not None:
+                    logger.info(f"Using edge splits from Step 2 for edge type: {target_edge_type}")
+                    train_edge_index, val_edge_index, test_edge_index = edge_splits
+                else:
+                    logger.info(f"Creating new edge splits for edge type: {target_edge_type}")
+                    logger.warning("Edge splits not available from Step 2 - creating new splits with same seed")
+                    
+                    # Get full edge index and use create_edge_splits() function
+                    full_edge_index = data[target_edge_type].edge_index
+                    train_edge_index, val_edge_index, test_edge_index = create_edge_splits(
+                        edge_index=full_edge_index,
+                        train_ratio=0.8,
+                        val_ratio=0.1,
+                        seed=args.seed
+                    )
+                max_edges = None
+                if args.test_mode:
+                    # In test mode, limit the number of edges for quick evaluation
+                    max_edges = 2000
+                    logger.info(f"Test mode enabled - limiting to max_edges={max_edges} for link prediction")
+                link_results = evaluate_link_prediction(
+                    embeddings=global_embeddings,
+                    train_edge_index=train_edge_index,
+                    val_edge_index=val_edge_index,
+                    test_edge_index=test_edge_index,
+                    device=device,
+                    n_runs=args.downstream_n_runs,
+                    num_neg_samples=args.downstream_neg_samples,
+                    hidden_dim=args.downstream_hidden_dim,
+                    num_layers=args.downstream_num_layers,
+                    dropout=args.downstream_dropout,
+                    batch_size=args.downstream_batch_size,
+                    lr=args.downstream_lr,
+                    weight_decay=args.downstream_weight_decay,
+                    num_epochs=args.downstream_epochs,
+                    early_stopping_patience=args.downstream_patience,
+                    max_edges=max_edges,
+                    verbose=True
+                )
+                
+                # Save link prediction results
+                link_results_path = results_path / "downstream_link_results.pt"
+                torch.save(link_results, link_results_path)
+                logger.info(f"Link prediction results saved to: {link_results_path}")
     
     # ==================== Final Summary ====================
     # Clean up wandb
@@ -503,10 +542,37 @@ def cli():
         choices=[
             "mse",
             "sce",
+            "bce",
             "mer",
-            "tar"
+            "tar",
+            "pfp",
+            "combined_loss"
         ],
-        help="loss function"
+        help="Loss function for self-supervised learning. For node: mse/sce. For edge: bce/mer/tar/pfp/combined_loss"
+    )
+    parser.add_argument(
+        "--mer_weight",
+        type=float,
+        default=1.0,
+        help="Weight for MER loss in HGMAE combined loss"
+    )
+    parser.add_argument(
+        "--tar_weight",
+        type=float,
+        default=1.0,
+        help="Weight for TAR loss in HGMAE combined loss"
+    )
+    parser.add_argument(
+        "--pfp_weight",
+        type=float,
+        default=1.0,
+        help="Weight for PFP loss in HGMAE combined loss"
+    )
+    parser.add_argument(
+        "--tar_temperature",
+        type=float,
+        default=0.5,
+        help="Temperature parameter for TAR loss"
     )
     parser.add_argument(
         "--target_edge_type",
@@ -732,7 +798,12 @@ def cli():
     parser.add_argument(
         "--test_mode",
         action="store_true",
-        help="Run in test mode with minimal settings for quick checks"
+        help="Run in test mode with minimal settings for quick checks (subsamples dataset, reduces neighbors, fewer downstream runs)"
+    )
+    parser.add_argument(
+        "--skip_downstream",
+        action="store_true",
+        help="Skip downstream evaluation entirely for fastest testing (only train the model)"
     )
     
     args = parser.parse_args()
@@ -768,6 +839,11 @@ def cli():
             "use_edge_decoder": args.use_edge_decoder,
             "use_feature_decoder": args.use_feature_decoder,
             "metric_for_best": args.metric_for_best,
+            "loss_fn": args.loss_fn,
+            "mer_weight": args.mer_weight,
+            "tar_weight": args.tar_weight,
+            "pfp_weight": args.pfp_weight,
+            "tar_temperature": args.tar_temperature,
             "downstream_eval": args.downstream_eval,
             "downstream_task": args.downstream_task,
             "downstream_n_runs": args.downstream_n_runs,
