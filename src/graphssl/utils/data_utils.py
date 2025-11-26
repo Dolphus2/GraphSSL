@@ -163,6 +163,21 @@ def create_link_loaders(
     logger.debug(f"  Batch size: {batch_size}")
     logger.debug(f"  Negative sampling ratio: {neg_sampling_ratio}")
     
+    # For this, we first split the set of edges into
+    # training (80%), validation (10%), and testing edges (10%).
+    # Across the training edges, we use 70% of edges for message passing,
+    # and 30% of edges for supervision.
+    transform = T.RandomLinkSplit(
+        num_val=0.1,
+        num_test=0.1,
+        disjoint_train_ratio=0.3,
+        neg_sampling_ratio=neg_sampling_ratio,
+        add_negative_train_samples=False,
+        edge_types=target_edge_type,
+        rev_edge_types=("movie", "rev_rates", "user"), 
+    )
+    train_data, val_data, test_data = transform(data)
+
     # Get edge indices for target edge type
     edge_index = data[target_edge_type].edge_index
     num_edges = edge_index.size(1)
@@ -423,61 +438,67 @@ def subsample_dataset(
     return data_sampled
 
 
+def _remap_and_filter_edges(data: HeteroData, node_type: str, node_mapping: torch.Tensor) -> None:
+    """Apply node remapping to edges and filter out invalid edges."""
+    edge_types = [et for et in data.edge_index_dict.keys() 
+                  if et[0] == node_type or et[-1] == node_type]
+    
+    for edge_type in edge_types:
+        edge_index = data.edge_index_dict[edge_type]
+        
+        src_mask = node_mapping[edge_index[0]] != -1 if edge_type[0] == node_type else torch.ones(edge_index.size(1), dtype=torch.bool)
+        dst_mask = node_mapping[edge_index[1]] != -1 if edge_type[-1] == node_type else torch.ones(edge_index.size(1), dtype=torch.bool)
+        
+        filtered_edge_index = edge_index[:, src_mask & dst_mask]
+        
+        if edge_type[0] == node_type:
+            filtered_edge_index[0] = node_mapping[filtered_edge_index[0]]
+        if edge_type[-1] == node_type:
+            filtered_edge_index[1] = node_mapping[filtered_edge_index[1]]
+        
+        data[edge_type].edge_index = filtered_edge_index
+
+
 def to_inductive(data: HeteroData, node_type: str) -> HeteroData:
-    """
-    Convert a heterogeneous graph into an inductive view by dropping validation/test
-    nodes and any edges touching them. The original node indices are remapped so the
-    returned graph only contains training nodes, making it safe for inductive loaders.
-    Note: This mutates the provided `data` object (val/test masks become empty).
-    """
-    train_mask = data[node_type].train_mask
-    train_mask_idxs = torch.where(train_mask)[0]
-    N_train = len(train_mask_idxs)
-
-    # define new edge index
-    new_paper_idxs = torch.full((len(train_mask),), -1, device=train_mask.device)
-    new_paper_idxs[train_mask] = torch.arange(N_train, device=train_mask.device)
-
-    # restrict node_type to only include train split
+    """Keep only train nodes, remap indices sequentially."""
+    train_mask = data[node_type].train_mask.clone()
+    N_train = train_mask.sum().item()
+    
+    node_mapping = torch.full((len(train_mask),), -1, device=train_mask.device)
+    node_mapping[train_mask] = torch.arange(N_train, device=train_mask.device)
+    
     data[node_type].x = data[node_type].x[train_mask]
     data[node_type].y = data[node_type].y[train_mask]
     data[node_type].year = data[node_type].year[train_mask]
-    data[node_type].train_mask = torch.ones((N_train), dtype=torch.bool, device=train_mask.device)
-    data[node_type].val_mask = torch.zeros((N_train), dtype=torch.bool, device=train_mask.device)
-    data[node_type].test_mask = torch.zeros((N_train), dtype=torch.bool, device=train_mask.device)
-    # From here there is no way to recover the val and test sets. Indexes have been reset. 
-    # This is not necessary. val_mask and test_mask could have been adjusted accordingly.
-
-    # find edges with node_type as either source or destination
-    edge_types = list(data.edge_index_dict.keys())
-    edge_type_mask = [(e[0] == node_type, e[-1] == node_type) for e in edge_types]
-
-    edge_index_dict = data.edge_index_dict
+    data[node_type].train_mask = torch.ones(N_train, dtype=torch.bool, device=train_mask.device)
+    data[node_type].val_mask = torch.zeros(N_train, dtype=torch.bool, device=train_mask.device)
+    data[node_type].test_mask = torch.zeros(N_train, dtype=torch.bool, device=train_mask.device)
     
-    for i, edge_type in enumerate(edge_types):
-        if not any(edge_type_mask[i]):
-            continue
-        
-        edge_index = edge_index_dict[edge_type]
-        src_mask = torch.ones((edge_index.size(1)), dtype=bool)
-        dst_mask = torch.ones((edge_index.size(1)), dtype=bool)
+    _remap_and_filter_edges(data, node_type, node_mapping)
+    
+    return data
 
-        # mask paper nodes in edge index not part of train
-        if edge_type[0] == node_type:
-            src_mask = new_paper_idxs[edge_index[0]] != -1
 
-        if edge_type[-1] == node_type:
-            dst_mask = new_paper_idxs[edge_index[1]] != -1
-        
-        edge_mask = src_mask & dst_mask
-        filtered_edge_index = edge_index[:, edge_mask]
-        
-        if edge_type[0] == node_type:
-            filtered_edge_index[0] = new_paper_idxs[filtered_edge_index[0]]
-        
-        if edge_type[-1] == node_type:
-            filtered_edge_index[1] = new_paper_idxs[filtered_edge_index[1]]
-        
-        data[edge_type]['edge_index'] = filtered_edge_index
-
+def val_to_inductive(data: HeteroData, node_type: str, seed: int = 42) -> HeteroData:
+    """Keep train+val nodes, remap indices randomly."""
+    train_mask = data[node_type].train_mask.clone()
+    val_mask = data[node_type].val_mask.clone()
+    N_train = train_mask.sum().item()
+    N_val = val_mask.sum().item()
+    
+    node_mapping = torch.full((len(train_mask),), -1, device=train_mask.device)
+    perm = torch.randperm(N_train + N_val, generator=torch.Generator().manual_seed(seed), device=train_mask.device)
+    node_mapping[train_mask] = perm[:N_train]
+    node_mapping[val_mask] = perm[N_train:]
+    
+    combined_mask = train_mask | val_mask
+    data[node_type].x = data[node_type].x[combined_mask]
+    data[node_type].y = data[node_type].y[combined_mask]
+    data[node_type].year = data[node_type].year[combined_mask]
+    data[node_type].train_mask = torch.zeros(N_train + N_val, dtype=torch.bool, device=train_mask.device).scatter_(0, perm[:N_train], True)
+    data[node_type].val_mask = torch.zeros(N_train + N_val, dtype=torch.bool, device=train_mask.device).scatter_(0, perm[N_train:], True)
+    data[node_type].test_mask = torch.zeros(N_train + N_val, dtype=torch.bool, device=train_mask.device)
+    
+    _remap_and_filter_edges(data, node_type, node_mapping)
+    
     return data
