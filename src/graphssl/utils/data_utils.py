@@ -349,6 +349,8 @@ def subsample_dataset(
     
     # Subsample target node type
     data_sampled[target_node_type].x = data[target_node_type].x[sampled_indices]
+    if hasattr(data[target_node_type], 'pos') and data[target_node_type].pos is not None:
+        data_sampled[target_node_type].pos = data[target_node_type].pos[sampled_indices]
     if hasattr(data[target_node_type], 'y') and data[target_node_type].y is not None:
         data_sampled[target_node_type].y = data[target_node_type].y[sampled_indices]
     if hasattr(data[target_node_type], 'train_mask') and data[target_node_type].train_mask is not None:
