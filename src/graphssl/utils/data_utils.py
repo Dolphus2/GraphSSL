@@ -591,3 +591,71 @@ def split_edges(
                 f"incident={num_incident}, msg_pass={num_msg_pass}, removed={num_split}")
     
     return data, split_edge_index
+
+
+def extract_and_save_embeddings(
+    model: torch.nn.Module,
+    train_loader: NeighborLoader,
+    val_loader: NeighborLoader,
+    test_loader: NeighborLoader,
+    global_loader: NeighborLoader,
+    device: torch.device,
+    target_node_type: str,
+    embeddings_path: str,
+    logger: logging.Logger
+) -> Dict:
+    """
+    Extract embeddings from model using loaders and save to disk.
+    
+    Args:
+        model: Trained model for embedding extraction
+        train_loader: Training NeighborLoader
+        val_loader: Validation NeighborLoader  
+        test_loader: Test NeighborLoader
+        global_loader: Global NeighborLoader
+        device: Device to use for extraction
+        target_node_type: Target node type for extraction
+        embeddings_path: Path to save embeddings
+        logger: Logger instance
+    
+    Returns:
+        Dictionary containing all embeddings and labels
+    """
+    from graphssl.utils.training_utils import extract_embeddings
+    
+    logger.info("Extracting embeddings from model...")
+    logger.info("Extracting train embeddings...")
+    train_embeddings, train_labels = extract_embeddings(
+        model, train_loader, device, target_node_type
+    )
+    logger.info("Extracting val embeddings...")
+    val_embeddings, val_labels = extract_embeddings(
+        model, val_loader, device, target_node_type
+    )
+    logger.info("Extracting test embeddings...")
+    test_embeddings, test_labels = extract_embeddings(
+        model, test_loader, device, target_node_type
+    )
+    logger.info("Extracting global embeddings...")
+    global_embeddings, _ = extract_embeddings(
+        model, global_loader, device, target_node_type
+    )
+    
+    # Save embeddings
+    embeddings_data = {
+        'train_embeddings': train_embeddings,
+        'global_embeddings': global_embeddings,
+        'train_labels': train_labels,
+        'val_embeddings': val_embeddings,
+        'val_labels': val_labels,
+        'test_embeddings': test_embeddings,
+        'test_labels': test_labels
+    }
+    torch.save(embeddings_data, embeddings_path)
+    logger.info(f"Embeddings saved to: {embeddings_path}")
+    logger.info(f"  Train embeddings shape: {train_embeddings.shape}")
+    logger.info(f"  Val embeddings shape: {val_embeddings.shape}")
+    logger.info(f"  Test embeddings shape: {test_embeddings.shape}")
+    logger.info(f"  Global embeddings shape: {global_embeddings.shape}")
+    
+    return embeddings_data

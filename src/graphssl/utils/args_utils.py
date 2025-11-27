@@ -97,7 +97,7 @@ def parse_args():
     parser.add_argument(
         "--target_edge_type",
         type=str,
-        default="paper,cites,paper",
+        default="paper, has_topic, field_of_study",
         help="Target edge type for link prediction (comma-separated: src,relation,dst)"
     )
     parser.add_argument(
@@ -279,6 +279,7 @@ def parse_args():
     parser.add_argument(
         "--downstream_eval",
         action="store_true",
+        default=True,
         help="Run downstream evaluation tasks"
     )
     parser.add_argument(
@@ -357,7 +358,8 @@ def parse_args():
     )
     parser.add_argument(
         "--skip_downstream",
-        action="store_true",
+        action="store_false",
+        dest="downstream_eval",
         help="Skip downstream evaluation entirely for fastest testing (only train the model)"
     )
     

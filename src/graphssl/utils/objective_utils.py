@@ -104,6 +104,67 @@ class SupervisedNodeClassification(TrainingObjective):
         return ["loss", "acc"]
 
 
+class DownstreamNodeClassification(TrainingObjective):
+    """
+    Downstream node classification objective for fixed embeddings.
+    Used for evaluating the quality of learned embeddings by training a classifier head.
+    """
+    
+    def __init__(self, classifier: torch.nn.Module, num_classes: int):
+        """
+        Args:
+            classifier: The classifier model (e.g., MLP)
+            num_classes: Number of classes for classification
+        """
+        super().__init__(target_node_type="embeddings")
+        self.classifier = classifier
+        self.num_classes = num_classes
+    
+    def step(
+        self,
+        model: torch.nn.Module,  # Not used, kept for interface compatibility
+        batch: Any,  # Tuple of (embeddings, labels)
+        is_training: bool = True
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        Forward pass and loss computation for downstream node classification.
+        
+        Args:
+            model: Not used (interface compatibility)
+            batch: Tuple of (embeddings, labels) from DataLoader
+            is_training: Whether in training mode
+        
+        Returns:
+            Tuple of (loss, metrics_dict)
+        """
+        # Unpack batch
+        embeddings, labels = batch
+        
+        # Forward pass through classifier
+        logits = self.classifier(embeddings)
+        
+        # Compute loss
+        loss = F.cross_entropy(logits, labels)
+        
+        # Compute accuracy
+        pred = logits.argmax(dim=-1)
+        correct = int((pred == labels).sum())
+        batch_size = embeddings.size(0)
+        accuracy = correct / batch_size
+        
+        metrics = {
+            "loss": loss.item(),
+            "acc": accuracy,
+            "correct": correct,
+            "total": batch_size
+        }
+        
+        return loss, metrics
+    
+    def get_metric_names(self) -> list:
+        return ["loss", "acc"]
+
+
 class SupervisedLinkPrediction(TrainingObjective):
     """
     Supervised link prediction objective.

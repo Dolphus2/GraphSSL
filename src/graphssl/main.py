@@ -21,8 +21,7 @@ from graphssl.utils.objective_utils import (
     FeatureDecoder
 )
 from graphssl.utils.downstream import (
-    evaluate_node_property_prediction,
-    evaluate_link_prediction
+    run_downstream_evaluation
 )
 from graphssl.utils.args_utils import parse_args, setup_logging_and_wandb
 
@@ -324,41 +323,20 @@ def run_pipeline(args):
         print("Step 9: Extracting Embeddings")
         print("="*80)
         
-        # Make sure to extract the inductive embeddings for downstream tasks. 
-        logger.info("Extracting train embeddings...")
-        train_embeddings, train_labels = extract_embeddings(
-            model, train_loader, device, args.target_node
-        ) 
-        logger.info("Extracting val embeddings...")
-        val_embeddings, val_labels = extract_embeddings(
-            model, val_loader, device, args.target_node
-        )
-        logger.info("Extracting test embeddings...")
-        test_embeddings, test_labels = extract_embeddings(
-            model, test_loader, device, args.target_node
-        )
-        # Extracting the global embeddings for convenience. Note: These should never be used for downstream tasks. 
-        logger.info("Extracting global embeddings...")
-        global_embeddings, _ = extract_embeddings(
-            model, global_loader, device, args.target_node
-        )
+        from graphssl.utils.data_utils import extract_and_save_embeddings
         
-        # Save embeddings
         embeddings_path = results_path / "embeddings.pt"
-        torch.save({
-            'train_embeddings': train_embeddings,
-            'global_embeddings': global_embeddings,
-            'train_labels': train_labels,
-            'val_embeddings': val_embeddings,
-            'val_labels': val_labels,
-            'test_embeddings': test_embeddings,
-            'test_labels': test_labels
-        }, embeddings_path)
-        logger.info(f"Embeddings saved to: {embeddings_path}")
-        logger.info(f"  Train embeddings shape: {train_embeddings.shape}")
-        logger.info(f"  Global embeddings shape: {global_embeddings.shape}")
-        logger.info(f"  Val embeddings shape: {val_embeddings.shape}")
-        logger.info(f"  Test embeddings shape: {test_embeddings.shape}")
+        embeddings_data = extract_and_save_embeddings(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            test_loader=test_loader,
+            global_loader=global_loader,
+            device=device,
+            target_node_type=args.target_node,
+            embeddings_path=embeddings_path,
+            logger=logger
+        )
     
     # ==================== Step 10: Downstream Evaluation (Optional) ====================
     if args.downstream_eval:
@@ -366,119 +344,18 @@ def run_pipeline(args):
         print("Step 10: Downstream Evaluation")
         print("="*80)
         
-        # Ensure embeddings are available for downstream evaluation
-        embeddings_path = results_path / "embeddings.pt"
-        
-        # Load or extract embeddings - always define these variables in Step 10
-        if embeddings_path.exists():
-            # Load from saved file
-            logger.info(f"Loading embeddings from: {embeddings_path}")
-            embeddings_data = torch.load(embeddings_path)
-            train_embeddings = embeddings_data['train_embeddings']
-            global_embeddings = embeddings_data['global_embeddings']
-            train_labels = embeddings_data['train_labels']
-            val_embeddings = embeddings_data['val_embeddings']
-            val_labels = embeddings_data['val_labels']
-            test_embeddings = embeddings_data['test_embeddings']
-            test_labels = embeddings_data['test_labels']
-        else:
-            # Extract embeddings from model
-            logger.info("Extracting embeddings from model...")
-            train_embeddings, train_labels = extract_embeddings(
-                model, train_loader, device, args.target_node
-            )
-            global_embeddings, _ = extract_embeddings(
-                model, global_loader, device, args.target_node
-            )
-            val_embeddings, val_labels = extract_embeddings(
-                model, val_loader, device, args.target_node
-            )
-            test_embeddings, test_labels = extract_embeddings(
-                model, test_loader, device, args.target_node
-            )
-            # Save for future use
-            torch.save({
-                'train_embeddings': train_embeddings,
-                'global_embeddings': global_embeddings,
-                'train_labels': train_labels,
-                'val_embeddings': val_embeddings,
-                'val_labels': val_labels,
-                'test_embeddings': test_embeddings,
-                'test_labels': test_labels
-            }, embeddings_path)
-            logger.info(f"Embeddings saved to: {embeddings_path}")
-        
-        # Ensure labels are available (required for downstream evaluation)
-        if train_labels is None or val_labels is None or test_labels is None:
-            raise ValueError("Labels are required for downstream evaluation but were not found in embeddings")
-        
-        # Skip downstream evaluation if requested
-        if args.skip_downstream:
-            logger.info("Skipping downstream evaluation (--skip_downstream flag set)")
-        else:
-            # Step 10a: Node Property Prediction
-            if args.downstream_task in ["node", "both"]:
-                node_results = evaluate_node_property_prediction(
-                    train_embeddings=train_embeddings,
-                    train_labels=train_labels,
-                    val_embeddings=val_embeddings,
-                    val_labels=val_labels,
-                    test_embeddings=test_embeddings,
-                    test_labels=test_labels,
-                    num_classes=dataset_info['num_classes'],
-                    device=device,
-                    n_runs=args.downstream_n_runs,
-                    hidden_dim=args.downstream_hidden_dim,
-                    num_layers=args.downstream_num_layers,
-                    dropout=args.downstream_dropout,
-                    batch_size=args.downstream_batch_size,
-                    lr=args.downstream_lr,
-                    weight_decay=args.downstream_weight_decay,
-                    num_epochs=args.downstream_epochs,
-                    early_stopping_patience=args.downstream_patience,
-                    verbose=True
-                )
-                
-                # Save node prediction results
-                node_results_path = results_path / "downstream_node_results.pt"
-                torch.save(node_results, node_results_path)
-                logger.info(f"Node property prediction results saved to: {node_results_path}")
-            
-            # Step 10b: Link Prediction
-            if args.downstream_task in ["link", "both"]:
-                # Edge splits are always available from Step 2
-                target_edge_type = tuple(args.target_edge_type.split(","))
-                logger.info(f"Using edge splits from Step 2 for edge type: {target_edge_type}")
-                train_edge_index, val_edge_index, test_edge_index = edge_splits
-                max_edges = None
-                if args.test_mode:
-                    # In test mode, limit the number of edges for quick evaluation
-                    max_edges = 2000
-                    logger.info(f"Test mode enabled - limiting to max_edges={max_edges} for link prediction")
-                link_results = evaluate_link_prediction(
-                    embeddings=global_embeddings,
-                    train_edge_index=train_edge_index,
-                    val_edge_index=val_edge_index,
-                    test_edge_index=test_edge_index,
-                    device=device,
-                    n_runs=args.downstream_n_runs,
-                    num_neg_samples=args.downstream_neg_samples,
-                    hidden_dim=args.downstream_hidden_dim,
-                    num_layers=args.downstream_num_layers,
-                    dropout=args.downstream_dropout,
-                    batch_size=args.downstream_batch_size,
-                    lr=args.downstream_lr,
-                    weight_decay=args.downstream_weight_decay,
-                    num_epochs=args.downstream_epochs,
-                    early_stopping_patience=args.downstream_patience,
-                    max_edges=max_edges,
-                    verbose=True
-                )
-                
-                # Save link prediction results
-                link_results_path = results_path / "downstream_link_results.pt"
-                torch.save(link_results, link_results_path)
-                logger.info(f"Link prediction results saved to: {link_results_path}")
+        run_downstream_evaluation(
+            args=args,
+            model=model,
+            train_data=train_data,
+            val_data=val_data,
+            test_data=test_data,
+            full_data=data,
+            edge_splits=edge_splits,
+            device=device,
+            results_path=results_path,
+            num_classes=dataset_info['num_classes']
+        )
     
     # ==================== Final Summary ====================
     # Clean up wandb
