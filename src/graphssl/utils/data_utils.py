@@ -175,13 +175,6 @@ def create_link_loaders(
     )
     train_data, val_data, test_data = transform(data)
     
-    train_edge_index = train_data[target_edge_type].edge_label_index
-    val_edge_index = val_data[target_edge_type].edge_label_index
-    test_edge_index = test_data[target_edge_type].edge_label_index
-    
-    logger.info(f"  Edge splits (seed={seed}): train={train_edge_index.size(1)}, "
-               f"val={val_edge_index.size(1)}, test={test_edge_index.size(1)}")
-    
     if node_inductive:
         train_data_inductive = to_inductive(train_data.clone(), target_node_type)
         val_data_inductive = val_to_inductive(val_data.clone(), target_node_type, seed)
@@ -189,31 +182,30 @@ def create_link_loaders(
     else:
         train_data_inductive = train_data
         val_data_inductive = train_data
+
+    train_inductive_edge_index = train_data_inductive[target_edge_type].edge_label_index
+    val_inductive_edge_index = val_data_inductive[target_edge_type].edge_label_index
+    test_edge_index = test_data[target_edge_type].edge_label_index
+
+    logger.info(f"  Edge splits (seed={seed}): train={train_inductive_edge_index.size(1)}, "
+               f"val={val_inductive_edge_index.size(1)}, test={test_edge_index.size(1)}")
     
     train_loader = LinkNeighborLoader(
         train_data_inductive,
         num_neighbors=num_neighbors,
-        edge_label_index=(target_edge_type, train_edge_index),
-        edge_label=torch.ones(train_edge_index.size(1)),
+        edge_label_index=(target_edge_type, train_inductive_edge_index),
+        edge_label=torch.ones(train_inductive_edge_index.size(1)),
         neg_sampling_ratio=neg_sampling_ratio,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=num_workers,
-    )
-
-    global_loader = NeighborLoader(
-        train_data if not node_inductive else data,
-        num_neighbors=num_neighbors,
-        batch_size=batch_size,
-        input_nodes=(target_node_type, torch.arange(data[target_node_type].num_nodes)),
         num_workers=num_workers,
     )
     
     val_loader = LinkNeighborLoader(
         val_data_inductive,
         num_neighbors=num_neighbors,
-        edge_label_index=(target_edge_type, val_edge_index),
-        edge_label=torch.ones(val_edge_index.size(1)),
+        edge_label_index=(target_edge_type, val_inductive_edge_index),
+        edge_label=torch.ones(val_inductive_edge_index.size(1)),
         neg_sampling_ratio=neg_sampling_ratio,
         batch_size=batch_size,
         shuffle=False,
@@ -221,13 +213,21 @@ def create_link_loaders(
     )
     
     test_loader = LinkNeighborLoader(
-        test_data if node_inductive else train_data,
+        test_data,
         num_neighbors=num_neighbors,
         edge_label_index=(target_edge_type, test_edge_index),
         edge_label=torch.ones(test_edge_index.size(1)),
         neg_sampling_ratio=neg_sampling_ratio,
         batch_size=batch_size,
         shuffle=False,
+        num_workers=num_workers,
+    )
+    # I am not sure what we use the global_loader for or if it is correct.
+    global_loader = NeighborLoader(
+        data,
+        num_neighbors=num_neighbors,
+        batch_size=batch_size,
+        input_nodes=(target_node_type, torch.arange(data[target_node_type].num_nodes)),
         num_workers=num_workers,
     )
     
@@ -237,7 +237,7 @@ def create_link_loaders(
     logger.debug(f"  Val batches: ~{len(val_loader)}")
     logger.debug(f"  Test batches: ~{len(test_loader)}")
     
-    edge_splits = (train_edge_index, val_edge_index, test_edge_index)
+    edge_splits = (train_inductive_edge_index, val_inductive_edge_index, test_edge_index)
     return train_loader, val_loader, test_loader, global_loader, edge_splits
 
 
