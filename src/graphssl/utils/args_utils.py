@@ -175,7 +175,7 @@ def parse_args():
         "--num_neighbors",
         type=int,
         nargs="+",
-        default=[15, 10],
+        default=[30]*2,
         help="Number of neighbors to sample at each layer"
     )
     parser.add_argument(

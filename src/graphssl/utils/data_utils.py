@@ -260,7 +260,11 @@ def create_edge_splits(
     target_edge_type: Tuple[str, str, str],
     seed: int = 42,
     node_inductive: bool = False,
-    target_node_type: str = "paper"
+    target_node_type: str = "paper",
+    dependent: bool = True,
+    train_edge_msg_pass_prop: float = 1.0,
+    val_edge_msg_pass_prop: float = 1.0,
+    test_edge_msg_pass_prop: float = 1.0
 ) -> Tuple[HeteroData, HeteroData, HeteroData, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Split edge indices into train/val/test sets using RandomLinkSplit.
@@ -271,6 +275,10 @@ def create_edge_splits(
         seed: Random seed for reproducible splitting
         node_inductive: If True, apply inductive transformation (remove val/test nodes from train/val splits)
         target_node_type: Node type for inductive transformation (only used if node_inductive=True)
+        dependent: If True, use dependent edge splits (edges incident to split nodes are controlled separately)
+        train_edge_msg_pass_prop: Proportion of train-incident edges to keep for message passing (only used if dependent=True)
+        val_edge_msg_pass_prop: Proportion of val-incident edges to keep for message passing (only used if dependent=True)
+        test_edge_msg_pass_prop: Proportion of test-incident edges to keep for message passing (only used if dependent=True)
     
     Returns:
         Tuple of (train_data, val_data, test_data, train_edge_index, val_edge_index, test_edge_index)
@@ -286,17 +294,60 @@ def create_edge_splits(
     )
     train_data, val_data, test_data = transform(data)
     
-    # Apply inductive transformation if requested
-    if node_inductive:
-        logger.debug(f"Applying inductive transformation to edge splits (target_node_type={target_node_type})")
-        train_data = to_inductive(train_data, target_node_type)
-        val_data = val_to_inductive(val_data, target_node_type, seed=seed)
+    if not dependent:
+        # Independent edge splits: apply node inductive transformation if requested
+        if node_inductive:
+            logger.debug(f"Applying inductive transformation to edge splits (target_node_type={target_node_type})")
+            train_data = to_inductive(train_data, target_node_type)
+            val_data = val_to_inductive(val_data, target_node_type, seed=seed)
+        
+        train_edge_index = train_data[target_edge_type].edge_label_index
+        val_edge_index = val_data[target_edge_type].edge_label_index
+        test_edge_index = test_data[target_edge_type].edge_label_index
+    else:
+        # Dependent edge splits: apply to_inductive transformations and split edges
+        logger.debug(f"Using dependent edge splits with message passing proportions: "
+                    f"train={train_edge_msg_pass_prop}, val={val_edge_msg_pass_prop}, test={test_edge_msg_pass_prop}")
+        
+        train_data_inductive = to_inductive(train_data, target_node_type)
+        
+        val_data_inductive = val_to_inductive(val_data, target_node_type, seed=seed)
+        
+        # Test data keeps all nodes (no inductive transformation)
+        test_data_inductive = test_data
+        
+        # Split edges incident to train nodes from train_data
+        train_data_inductive, train_edge_index = split_edges(
+            train_data_inductive,
+            target_edge_type,
+            split="train",
+            edge_msg_pass_prop=train_edge_msg_pass_prop,
+            seed=seed
+        )
+        
+        # Split edges incident to val nodes from val_data
+        val_data_inductive, val_edge_index = split_edges(
+            val_data_inductive,
+            target_edge_type,
+            split="val",
+            edge_msg_pass_prop=val_edge_msg_pass_prop,
+            seed=seed
+        )
+        
+        # Split edges incident to test nodes from test_data
+        test_data_inductive, test_edge_index = split_edges(
+            test_data_inductive,
+            target_edge_type,
+            split="test",
+            edge_msg_pass_prop=test_edge_msg_pass_prop,
+            seed=seed
+        )
+        
+        train_data = train_data_inductive
+        val_data = val_data_inductive
+        test_data = test_data_inductive
     
-    train_edge_index = train_data[target_edge_type].edge_label_index
-    val_edge_index = val_data[target_edge_type].edge_label_index
-    test_edge_index = test_data[target_edge_type].edge_label_index
-    
-    logger.debug(f"Split edges (seed={seed}, node_inductive={node_inductive}): "
+    logger.debug(f"Split edges (seed={seed}, dependent={dependent}, node_inductive={node_inductive}): "
                 f"train={train_edge_index.size(1)}, "
                 f"val={val_edge_index.size(1)}, "
                 f"test={test_edge_index.size(1)}")

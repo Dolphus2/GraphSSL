@@ -89,7 +89,7 @@ def run_pipeline(args):
     # Apply test mode optimizations
     if args.test_mode:
         # Reduce neighbor sampling for faster testing
-        if args.num_neighbors == [30]*2:  # Only override if using defaults
+        if args.num_neighbors == [15, 10]:  # Only override if using defaults
             args.num_neighbors = [10, 5]  # Much fewer neighbors
             logger.info(f"Test mode: reducing num_neighbors to {args.num_neighbors}")
         # Reduce downstream runs
