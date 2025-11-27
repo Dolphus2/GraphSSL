@@ -270,40 +270,47 @@ def get_dataset_info(data: HeteroData, target_node_type: str = "paper") -> Dict:
 
 
 def create_edge_splits(
-    edge_index: torch.Tensor,
-    train_ratio: float = 0.8,
-    val_ratio: float = 0.1,
-    seed: int = 42
+    data: HeteroData,
+    target_edge_type: Tuple[str, str, str],
+    seed: int = 42,
+    node_inductive: bool = False,
+    target_node_type: str = "paper"
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Split edge indices into train/val/test sets.
+    Split edge indices into train/val/test sets using RandomLinkSplit.
     
     Args:
-        edge_index: Edge indices [2, num_edges]
-        train_ratio: Ratio of edges for training (default: 0.8)
-        val_ratio: Ratio of edges for validation (default: 0.1)
+        data: HeteroData object
+        target_edge_type: Edge type tuple (src_type, relation, dst_type)
         seed: Random seed for reproducible splitting
+        node_inductive: If True, apply inductive transformation (remove val/test nodes from train/val splits)
+        target_node_type: Node type for inductive transformation (only used if node_inductive=True)
     
     Returns:
         Tuple of (train_edge_index, val_edge_index, test_edge_index)
     """
-    num_edges = edge_index.size(1)
+    torch.manual_seed(seed)
+    transform = T.RandomLinkSplit(
+        num_val=0.1,
+        num_test=0.1,
+        disjoint_train_ratio=0.3,
+        neg_sampling_ratio=0.0,
+        add_negative_train_samples=False,
+        edge_types=target_edge_type,
+    )
+    train_data, val_data, test_data = transform(data)
     
-    # Shuffle edges with fixed seed for reproducibility
-    generator = torch.Generator().manual_seed(seed)
-    perm = torch.randperm(num_edges, generator=generator)
-    edge_index_shuffled = edge_index[:, perm]
+    # Apply inductive transformation if requested
+    if node_inductive:
+        logger.debug(f"Applying inductive transformation to edge splits (target_node_type={target_node_type})")
+        train_data = to_inductive(train_data, target_node_type)
+        val_data = val_to_inductive(val_data, target_node_type, seed=seed)
     
-    # Calculate split sizes
-    train_size = int(train_ratio * num_edges)
-    val_size = int(val_ratio * num_edges)
+    train_edge_index = train_data[target_edge_type].edge_label_index
+    val_edge_index = val_data[target_edge_type].edge_label_index
+    test_edge_index = test_data[target_edge_type].edge_label_index
     
-    # Split edges
-    train_edge_index = edge_index_shuffled[:, :train_size]
-    val_edge_index = edge_index_shuffled[:, train_size:train_size + val_size]
-    test_edge_index = edge_index_shuffled[:, train_size + val_size:]
-    
-    logger.debug(f"Split {num_edges} edges (seed={seed}): "
+    logger.debug(f"Split edges (seed={seed}, node_inductive={node_inductive}): "
                 f"train={train_edge_index.size(1)}, "
                 f"val={val_edge_index.size(1)}, "
                 f"test={test_edge_index.size(1)}")

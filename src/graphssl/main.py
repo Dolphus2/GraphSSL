@@ -101,12 +101,9 @@ def run_pipeline(args):
             args.downstream_epochs = 3
             logger.info(f"Test mode: reducing downstream_epochs to 3")
     
-    # Initialize edge_splits as None (will be populated for link prediction tasks)
-    edge_splits = None
-    
     if args.objective_type == "supervised_link_prediction" or args.objective_type == "self_supervised_edge":
         # Create link prediction loaders with edge splits
-        train_loader, val_loader, test_loader, global_loader, edge_splits = create_link_loaders(
+        inductive_train_loader, inductive_val_loader, test_loader, global_loader, edge_splits = create_link_loaders(
             data,
             target_edge_type=tuple(args.target_edge_type.split(",")),
             num_neighbors=args.num_neighbors,
@@ -117,13 +114,12 @@ def run_pipeline(args):
             target_node_type=args.target_node,
             node_inductive=args.node_inductive
         )
-        inductive_train_loader = train_loader # Just reuse the name
         logger.info(f"Edge splits stored for downstream evaluation (seed={args.seed})")
         if args.node_inductive:
             logger.info("Using node inductive learning for link prediction")
     else:
         # Create neighbor loaders for node-level tasks
-        inductive_train_loader, val_loader, test_loader, global_loader= create_neighbor_loaders(
+        inductive_train_loader, inductive_val_loader, test_loader, global_loader= create_neighbor_loaders(
             data,
             num_neighbors=args.num_neighbors,
             batch_size=args.batch_size,
@@ -131,6 +127,14 @@ def run_pipeline(args):
             target_node_type=args.target_node,
             seed=args.seed,
         )
+        # Create edge splits for downstream link prediction evaluation
+        target_edge_type = tuple(args.target_edge_type.split(","))
+        edge_splits = create_edge_splits(
+            data=data,
+            target_edge_type=target_edge_type,
+            seed=args.seed
+        )
+        logger.info(f"Edge splits created for downstream evaluation (seed={args.seed})")
     
     # ==================== Step 3: Create Training Objective ====================
     print("\n" + "="*80)
@@ -240,14 +244,11 @@ def run_pipeline(args):
     results_path.mkdir(parents=True, exist_ok=True)
     checkpoint_dir = results_path / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Determine which train loader to use
-    train_loader_to_use = inductive_train_loader
    
     history = train_model(
         model=model,
-        train_loader=train_loader_to_use,
-        val_loader=val_loader,
+        train_loader=inductive_train_loader,
+        val_loader=inductive_val_loader,
         optimizer=optimizer,
         objective=objective,
         device=device,
@@ -317,7 +318,7 @@ def run_pipeline(args):
         
         logger.info("Extracting val embeddings...")
         val_embeddings, val_labels = extract_embeddings(
-            model, val_loader, device, args.target_node
+            model, inductive_val_loader, device, args.target_node
         )
         
         logger.info("Extracting test embeddings...")
@@ -373,7 +374,7 @@ def run_pipeline(args):
                 model, global_loader, device, args.target_node
             )
             val_embeddings, val_labels = extract_embeddings(
-                model, val_loader, device, args.target_node
+                model, inductive_val_loader, device, args.target_node
             )
             test_embeddings, test_labels = extract_embeddings(
                 model, test_loader, device, args.target_node
@@ -428,25 +429,10 @@ def run_pipeline(args):
             
             # Step 10b: Link Prediction
             if args.downstream_task in ["link", "both"]:
-                # For link prediction, we need edge indices
+                # Edge splits are always available from Step 2
                 target_edge_type = tuple(args.target_edge_type.split(","))
-                
-                # Use edge splits from Step 2 if available, otherwise create new splits
-                if edge_splits is not None:
-                    logger.info(f"Using edge splits from Step 2 for edge type: {target_edge_type}")
-                    train_edge_index, val_edge_index, test_edge_index = edge_splits
-                else:
-                    logger.info(f"Creating new edge splits for edge type: {target_edge_type}")
-                    logger.warning("Edge splits not available from Step 2 - creating new splits with same seed")
-                    
-                    # Get full edge index and use create_edge_splits() function
-                    full_edge_index = data[target_edge_type].edge_index
-                    train_edge_index, val_edge_index, test_edge_index = create_edge_splits(
-                        edge_index=full_edge_index,
-                        train_ratio=0.8,
-                        val_ratio=0.1,
-                        seed=args.seed
-                    )
+                logger.info(f"Using edge splits from Step 2 for edge type: {target_edge_type}")
+                train_edge_index, val_edge_index, test_edge_index = edge_splits
                 max_edges = None
                 if args.test_mode:
                     # In test mode, limit the number of edges for quick evaluation
