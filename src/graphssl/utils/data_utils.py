@@ -137,7 +137,8 @@ def create_link_loaders(
     neg_sampling_ratio: float = 1.0,
     num_workers: int = 4,
     seed: int = 42,
-    target_node_type: str = "paper"
+    target_node_type: str = "paper",
+    node_inductive: bool = False
 ) -> Tuple[LinkNeighborLoader, LinkNeighborLoader, LinkNeighborLoader, NeighborLoader, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """
     Create train, validation, and test LinkNeighborLoaders for link prediction.
@@ -151,6 +152,7 @@ def create_link_loaders(
         num_workers: Number of worker processes for data loading
         seed: Random seed for reproducible edge splitting
         target_node_type: Target node type for global_loader
+        node_inductive: If True, remove val/test nodes from train data and test nodes from val data
     
     Returns:
         Tuple of (train_loader, val_loader, test_loader, global_loader, edge_splits)
@@ -160,6 +162,7 @@ def create_link_loaders(
     logger.debug(f"  Neighbors per layer: {num_neighbors}")
     logger.debug(f"  Batch size: {batch_size}")
     logger.debug(f"  Negative sampling ratio: {neg_sampling_ratio}")
+    logger.debug(f"  Node inductive: {node_inductive}")
     
     torch.manual_seed(seed)
     transform = T.RandomLinkSplit(
@@ -179,8 +182,16 @@ def create_link_loaders(
     logger.info(f"  Edge splits (seed={seed}): train={train_edge_index.size(1)}, "
                f"val={val_edge_index.size(1)}, test={test_edge_index.size(1)}")
     
+    if node_inductive:
+        train_data_inductive = to_inductive(train_data.clone(), target_node_type)
+        val_data_inductive = val_to_inductive(val_data.clone(), target_node_type, seed)
+        logger.debug(f"  Applied node inductive transformation")
+    else:
+        train_data_inductive = train_data
+        val_data_inductive = train_data
+    
     train_loader = LinkNeighborLoader(
-        train_data,
+        train_data_inductive,
         num_neighbors=num_neighbors,
         edge_label_index=(target_edge_type, train_edge_index),
         edge_label=torch.ones(train_edge_index.size(1)),
@@ -191,7 +202,7 @@ def create_link_loaders(
     )
 
     global_loader = NeighborLoader(
-        train_data,
+        train_data if not node_inductive else data,
         num_neighbors=num_neighbors,
         batch_size=batch_size,
         input_nodes=(target_node_type, torch.arange(data[target_node_type].num_nodes)),
@@ -199,7 +210,7 @@ def create_link_loaders(
     )
     
     val_loader = LinkNeighborLoader(
-        train_data,
+        val_data_inductive,
         num_neighbors=num_neighbors,
         edge_label_index=(target_edge_type, val_edge_index),
         edge_label=torch.ones(val_edge_index.size(1)),
@@ -210,7 +221,7 @@ def create_link_loaders(
     )
     
     test_loader = LinkNeighborLoader(
-        train_data,
+        test_data if node_inductive else train_data,
         num_neighbors=num_neighbors,
         edge_label_index=(target_edge_type, test_edge_index),
         edge_label=torch.ones(test_edge_index.size(1)),
@@ -408,8 +419,9 @@ def _remap_and_filter_edges(data: HeteroData, node_type: str, node_mapping: torc
         
         src_mask = node_mapping[edge_index[0]] != -1 if edge_type[0] == node_type else torch.ones(edge_index.size(1), dtype=torch.bool)
         dst_mask = node_mapping[edge_index[1]] != -1 if edge_type[-1] == node_type else torch.ones(edge_index.size(1), dtype=torch.bool)
+        edge_mask = src_mask & dst_mask
         
-        filtered_edge_index = edge_index[:, src_mask & dst_mask]
+        filtered_edge_index = edge_index[:, edge_mask]
         
         if edge_type[0] == node_type:
             filtered_edge_index[0] = node_mapping[filtered_edge_index[0]]
@@ -417,6 +429,25 @@ def _remap_and_filter_edges(data: HeteroData, node_type: str, node_mapping: torc
             filtered_edge_index[1] = node_mapping[filtered_edge_index[1]]
         
         data[edge_type].edge_index = filtered_edge_index
+        
+        if hasattr(data[edge_type], 'edge_label_index') and data[edge_type].edge_label_index is not None:
+            edge_label_index = data[edge_type].edge_label_index
+            
+            label_src_mask = node_mapping[edge_label_index[0]] != -1 if edge_type[0] == node_type else torch.ones(edge_label_index.size(1), dtype=torch.bool)
+            label_dst_mask = node_mapping[edge_label_index[1]] != -1 if edge_type[-1] == node_type else torch.ones(edge_label_index.size(1), dtype=torch.bool)
+            label_edge_mask = label_src_mask & label_dst_mask
+            
+            filtered_edge_label_index = edge_label_index[:, label_edge_mask]
+            
+            if edge_type[0] == node_type:
+                filtered_edge_label_index[0] = node_mapping[filtered_edge_label_index[0]]
+            if edge_type[-1] == node_type:
+                filtered_edge_label_index[1] = node_mapping[filtered_edge_label_index[1]]
+            
+            data[edge_type].edge_label_index = filtered_edge_label_index
+            
+            if hasattr(data[edge_type], 'edge_label') and data[edge_type].edge_label is not None:
+                data[edge_type].edge_label = data[edge_type].edge_label[label_edge_mask]
 
 
 def to_inductive(data: HeteroData, node_type: str) -> HeteroData:
