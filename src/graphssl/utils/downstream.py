@@ -739,12 +739,10 @@ def run_downstream_evaluation(
             "Edge splits not available from Step 2 - creating new splits with same seed"
         )
 
-        # Get full edge index and use create_edge_splits() function
-        full_edge_index = data[target_edge_type].edge_index
+        # Create edge splits using the data object
         train_edge_index, val_edge_index, test_edge_index = create_edge_splits(
-            edge_index=full_edge_index,
-            train_ratio=0.8,
-            val_ratio=0.1,
+            data=data,
+            target_edge_type=target_edge_type,
             seed=args.seed,
         )
         
