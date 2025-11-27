@@ -49,138 +49,124 @@ def load_ogb_mag(root_path: str, preprocess: str = "metapath2vec") -> HeteroData
 
 
 def create_neighbor_loaders(
-    data: HeteroData,
+    train_data: HeteroData,
+    val_data: HeteroData,
+    test_data: HeteroData,
+    full_data: HeteroData,
     num_neighbors: list = [30]*2,
     batch_size: int = 1024,
     num_workers: int = 4,
-    target_node_type: str = "paper",
-    seed = 42,
+    target_node_type: str = "paper"
 ) -> Tuple[NeighborLoader, NeighborLoader, NeighborLoader, NeighborLoader]:
     """
     Create train, validation, and test NeighborLoaders for heterogeneous graphs.
     
     Args:
-        data: HeteroData object
+        train_data: Train split HeteroData object
+        val_data: Validation split HeteroData object
+        test_data: Test split HeteroData object
+        full_data: Full HeteroData object (for global loader)
         num_neighbors: Number of neighbors to sample at each layer [layer1, layer2, ...]
         batch_size: Batch size for loading
         num_workers: Number of worker processes for data loading
         target_node_type: The node type we're making predictions for
     
     Returns:
-        Tuple of (train_loader, val_loader, test_loader)
+        Tuple of (train_loader, val_loader, test_loader, global_loader)
     """
     logger.debug(f"Creating NeighborLoaders with:")
     logger.debug(f"  Neighbors per layer: {num_neighbors}")
     logger.debug(f"  Batch size: {batch_size}")
     logger.debug(f"  Target node type: {target_node_type}")
 
-    # Create inductive train dataset
-    train_data_inductive = to_inductive(data.clone(), target_node_type)
-
-    # Inductive training loader - only sample from training nodes with test and val nodes removed
-    # Note: data_inductive already has only train nodes, so use its train_mask
-    inductive_train_loader = NeighborLoader(
-        train_data_inductive,
+    train_loader = NeighborLoader(
+        train_data,
         num_neighbors=num_neighbors,
         batch_size=batch_size,
-        input_nodes=(target_node_type, train_data_inductive[target_node_type].train_mask),
+        input_nodes=(target_node_type, train_data[target_node_type].train_mask),
         num_workers=num_workers,
         shuffle=True,
     )
     
-    # Create inductive train dataset
-    val_data_inductive = val_to_inductive(data.clone(), target_node_type, seed)
-    
-    # Validation loader. # sample from val nodes with connections to test nodes removed.
     val_loader = NeighborLoader(
-        val_data_inductive,
+        val_data,
         num_neighbors=num_neighbors,
         batch_size=batch_size,
-        input_nodes=(target_node_type, val_data_inductive[target_node_type].val_mask),
+        input_nodes=(target_node_type, val_data[target_node_type].val_mask),
         num_workers=num_workers,
         shuffle=False,
     )
     
-    # Test loader
     test_loader = NeighborLoader(
-        data,
+        test_data,
         num_neighbors=num_neighbors,
         batch_size=batch_size,
-        input_nodes=(target_node_type, data[target_node_type].test_mask),
+        input_nodes=(target_node_type, test_data[target_node_type].test_mask),
         num_workers=num_workers,
         shuffle=False,
     )
 
-    # We need global ids
     global_loader = NeighborLoader(
-        data,
+        full_data,
         num_neighbors=num_neighbors,
         batch_size=batch_size,
-        input_nodes=(target_node_type, torch.arange(data[target_node_type].num_nodes)),
+        input_nodes=(target_node_type, torch.arange(full_data[target_node_type].num_nodes)),
         num_workers=num_workers,
     )
     
-    logger.info("Loaders created successfully!")
-    logger.debug(f"  Inductive Train batches: ~{len(inductive_train_loader)}")
-    logger.debug(f"  Global batches: ~{len(global_loader)}")
+    logger.info("NeighborLoaders created successfully!")
+    logger.debug(f"  Train batches: ~{len(train_loader)}")
     logger.debug(f"  Val batches: ~{len(val_loader)}")
     logger.debug(f"  Test batches: ~{len(test_loader)}")
+    logger.debug(f"  Global batches: ~{len(global_loader)}")
     
-    return inductive_train_loader, val_loader, test_loader, global_loader
+    return train_loader, val_loader, test_loader, global_loader
 
 
 def create_link_loaders(
-    data: HeteroData,
+    train_data: HeteroData,
+    val_data: HeteroData,
+    test_data: HeteroData,
+    train_edge_index: torch.Tensor,
+    val_edge_index: torch.Tensor,
+    test_edge_index: torch.Tensor,
     target_edge_type: Tuple[str, str, str],
     num_neighbors: list = [15, 10],
     batch_size: int = 1024,
     neg_sampling_ratio: float = 1.0,
-    num_workers: int = 4,
-    seed: int = 42,
-    target_node_type: str = "paper",
-    node_inductive: bool = False
-) -> Tuple[LinkNeighborLoader, LinkNeighborLoader, LinkNeighborLoader, NeighborLoader, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    num_workers: int = 4
+) -> Tuple[LinkNeighborLoader, LinkNeighborLoader, LinkNeighborLoader]:
     """
     Create train, validation, and test LinkNeighborLoaders for link prediction.
     
     Args:
-        data: HeteroData object
+        train_data: Train split HeteroData object
+        val_data: Validation split HeteroData object
+        test_data: Test split HeteroData object
+        train_edge_index: Train edge indices
+        val_edge_index: Validation edge indices
+        test_edge_index: Test edge indices
         target_edge_type: Edge type tuple (src_type, relation, dst_type) for link prediction
         num_neighbors: Number of neighbors to sample at each layer
         batch_size: Batch size for loading (number of edges per batch)
         neg_sampling_ratio: Ratio of negative to positive samples
         num_workers: Number of worker processes for data loading
-        seed: Random seed for reproducible edge splitting
-        target_node_type: Target node type for global_loader
-        node_inductive: If True, remove val/test nodes from train data and test nodes from val data
     
     Returns:
-        Tuple of (train_loader, val_loader, test_loader, global_loader, edge_splits)
+        Tuple of (train_loader, val_loader, test_loader)
     """
     logger.debug(f"Creating LinkNeighborLoaders with:")
     logger.debug(f"  Target edge type: {target_edge_type}")
     logger.debug(f"  Neighbors per layer: {num_neighbors}")
     logger.debug(f"  Batch size: {batch_size}")
     logger.debug(f"  Negative sampling ratio: {neg_sampling_ratio}")
-    logger.debug(f"  Node inductive: {node_inductive}")
-    
-    # Use create_edge_splits to get split datasets and edge indices
-    train_data_inductive, val_data_inductive, test_data, train_inductive_edge_index, val_inductive_edge_index, test_edge_index = create_edge_splits(
-        data=data,
-        target_edge_type=target_edge_type,
-        seed=seed,
-        node_inductive=node_inductive,
-        target_node_type=target_node_type
-    )
-
-    logger.info(f"  Edge splits (seed={seed}): train={train_inductive_edge_index.size(1)}, "
-               f"val={val_inductive_edge_index.size(1)}, test={test_edge_index.size(1)}")
+    logger.debug(f"  Train edges: {train_edge_index.size(1)}, Val edges: {val_edge_index.size(1)}, Test edges: {test_edge_index.size(1)}")
     
     train_loader = LinkNeighborLoader(
-        train_data_inductive,
+        train_data,
         num_neighbors=num_neighbors,
-        edge_label_index=(target_edge_type, train_inductive_edge_index),
-        edge_label=torch.ones(train_inductive_edge_index.size(1)),
+        edge_label_index=(target_edge_type, train_edge_index),
+        edge_label=torch.ones(train_edge_index.size(1)),
         neg_sampling_ratio=neg_sampling_ratio,
         batch_size=batch_size,
         shuffle=True,
@@ -188,10 +174,10 @@ def create_link_loaders(
     )
     
     val_loader = LinkNeighborLoader(
-        val_data_inductive,
+        val_data,
         num_neighbors=num_neighbors,
-        edge_label_index=(target_edge_type, val_inductive_edge_index),
-        edge_label=torch.ones(val_inductive_edge_index.size(1)),
+        edge_label_index=(target_edge_type, val_edge_index),
+        edge_label=torch.ones(val_edge_index.size(1)),
         neg_sampling_ratio=neg_sampling_ratio,
         batch_size=batch_size,
         shuffle=False,
@@ -208,23 +194,13 @@ def create_link_loaders(
         shuffle=False,
         num_workers=num_workers,
     )
-    # I am not sure what we use the global_loader for or if it is correct.
-    global_loader = NeighborLoader(
-        data,
-        num_neighbors=num_neighbors,
-        batch_size=batch_size,
-        input_nodes=(target_node_type, torch.arange(data[target_node_type].num_nodes)),
-        num_workers=num_workers,
-    )
     
-    logger.info("Link prediction loaders created successfully!")
+    logger.info("LinkNeighborLoaders created successfully!")
     logger.debug(f"  Train batches: ~{len(train_loader)}")
-    logger.debug(f"  Global batches: ~{len(global_loader)}")
     logger.debug(f"  Val batches: ~{len(val_loader)}")
     logger.debug(f"  Test batches: ~{len(test_loader)}")
     
-    edge_splits = (train_inductive_edge_index, val_inductive_edge_index, test_edge_index)
-    return train_loader, val_loader, test_loader, global_loader, edge_splits
+    return train_loader, val_loader, test_loader
 
 
 def get_dataset_info(data: HeteroData, target_node_type: str = "paper") -> Dict:
@@ -262,9 +238,9 @@ def create_edge_splits(
     node_inductive: bool = False,
     target_node_type: str = "paper",
     dependent: bool = True,
-    train_edge_msg_pass_prop: float = 1.0,
-    val_edge_msg_pass_prop: float = 1.0,
-    test_edge_msg_pass_prop: float = 1.0
+    train_edge_msg_pass_prop: float = 0.7,
+    val_edge_msg_pass_prop: float = 0.7,
+    test_edge_msg_pass_prop: float = 0.7,
 ) -> Tuple[HeteroData, HeteroData, HeteroData, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Split edge indices into train/val/test sets using RandomLinkSplit.

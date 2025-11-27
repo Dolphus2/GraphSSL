@@ -101,41 +101,61 @@ def run_pipeline(args):
             args.downstream_epochs = 3
             logger.info(f"Test mode: reducing downstream_epochs to 3")
     
+    # Step 2a: Create edge/node splits
+    target_edge_type = tuple(args.target_edge_type.split(","))
+    train_data, val_data, test_data, train_edge_index, val_edge_index, test_edge_index = create_edge_splits(
+        data=data,
+        target_edge_type=target_edge_type,
+        seed=args.seed,
+        node_inductive=args.node_inductive,
+        target_node_type=args.target_node,
+        dependent=args.dependent_node_edge_data_split,
+        train_edge_msg_pass_prop=args.edge_msg_pass_prop[0],
+        val_edge_msg_pass_prop=args.edge_msg_pass_prop[1],
+        test_edge_msg_pass_prop=args.edge_msg_pass_prop[2]
+    )
+    edge_splits = (train_edge_index, val_edge_index, test_edge_index)
+    logger.info(f"Data splits created (seed={args.seed}): train={train_edge_index.size(1)}, val={val_edge_index.size(1)}, test={test_edge_index.size(1)}")
+    if args.node_inductive:
+        logger.info("Using node inductive learning")
+    
+    # Step 2b: Create NeighborLoaders (for node embeddings)
+    train_loader, val_loader, test_loader, global_loader = create_neighbor_loaders(
+        train_data=train_data,
+        val_data=val_data,
+        test_data=test_data,
+        full_data=data,
+        num_neighbors=args.num_neighbors,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        target_node_type=args.target_node
+    )
+    
+    # Step 2c: Create LinkNeighborLoaders for link-based objectives
+    # Default to using neighbor loaders for training
+    train_loader_for_training = train_loader
+    val_loader_for_training = val_loader
+    test_loader_for_testing = test_loader
+    
     if args.objective_type == "supervised_link_prediction" or args.objective_type == "self_supervised_edge":
-        # Create link prediction loaders with edge splits
-        inductive_train_loader, inductive_val_loader, test_loader, global_loader, edge_splits = create_link_loaders(
-            data,
-            target_edge_type=tuple(args.target_edge_type.split(",")),
+        link_train_loader, link_val_loader, link_test_loader = create_link_loaders(
+            train_data=train_data,
+            val_data=val_data,
+            test_data=test_data,
+            train_edge_index=train_edge_index,
+            val_edge_index=val_edge_index,
+            test_edge_index=test_edge_index,
+            target_edge_type=target_edge_type,
             num_neighbors=args.num_neighbors,
             batch_size=args.batch_size,
             neg_sampling_ratio=args.neg_sampling_ratio,
-            num_workers=args.num_workers,
-            seed=args.seed,
-            target_node_type=args.target_node,
-            node_inductive=args.node_inductive
+            num_workers=args.num_workers
         )
-        logger.info(f"Edge splits stored for downstream evaluation (seed={args.seed})")
-        if args.node_inductive:
-            logger.info("Using node inductive learning for link prediction")
-    else:
-        # Create neighbor loaders for node-level tasks
-        inductive_train_loader, inductive_val_loader, test_loader, global_loader= create_neighbor_loaders(
-            data,
-            num_neighbors=args.num_neighbors,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            target_node_type=args.target_node,
-            seed=args.seed,
-        )
-        # Create edge splits for downstream link prediction evaluation
-        target_edge_type = tuple(args.target_edge_type.split(","))
-        _, _, _, train_edge_index, val_edge_index, test_edge_index = create_edge_splits(
-            data=data,
-            target_edge_type=target_edge_type,
-            seed=args.seed
-        )
-        edge_splits = (train_edge_index, val_edge_index, test_edge_index)
-        logger.info(f"Edge splits created for downstream evaluation (seed={args.seed})")
+        logger.info("LinkNeighborLoaders created for link-based objective")
+        # Override with link loaders for link-based objectives
+        train_loader_for_training = link_train_loader
+        val_loader_for_training = link_val_loader
+        test_loader_for_testing = link_test_loader
     
     # ==================== Step 3: Create Training Objective ====================
     print("\n" + "="*80)
@@ -245,11 +265,11 @@ def run_pipeline(args):
     results_path.mkdir(parents=True, exist_ok=True)
     checkpoint_dir = results_path / "checkpoints"
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
-   
+    
     history = train_model(
         model=model,
-        train_loader=inductive_train_loader,
-        val_loader=inductive_val_loader,
+        train_loader=train_loader_for_training,
+        val_loader=val_loader_for_training,
         optimizer=optimizer,
         objective=objective,
         device=device,
@@ -268,7 +288,7 @@ def run_pipeline(args):
     
     test_metrics = test_model(
         model=model,
-        test_loader=test_loader,
+        test_loader=test_loader_for_testing,
         objective=objective,
         device=device
     )
@@ -303,28 +323,24 @@ def run_pipeline(args):
         print("\n" + "="*80)
         print("Step 9: Extracting Embeddings")
         print("="*80)
-        # Consider extracting embeddings once by running the model on the full graph.
         
+        # Make sure to extract the inductive embeddings for downstream tasks. 
         logger.info("Extracting train embeddings...")
         train_embeddings, train_labels = extract_embeddings(
-            model, inductive_train_loader, device, args.target_node
+            model, train_loader, device, args.target_node
         ) 
-        logger.info("Extracting global embeddings...")
-        global_embeddings, _ = extract_embeddings(
-            model, global_loader, device, args.target_node
-        )
-        # Embeddings for inductive and transductive are not equivalent. 
-        # Transductive train embeddings contain information about val and test nodes as well 
-        # and so are appropriate for downstream tasks, where the graph has evolved further than test. 
-        
         logger.info("Extracting val embeddings...")
         val_embeddings, val_labels = extract_embeddings(
-            model, inductive_val_loader, device, args.target_node
+            model, val_loader, device, args.target_node
         )
-        
         logger.info("Extracting test embeddings...")
         test_embeddings, test_labels = extract_embeddings(
             model, test_loader, device, args.target_node
+        )
+        # Extracting the global embeddings for convenience. Note: These should never be used for downstream tasks. 
+        logger.info("Extracting global embeddings...")
+        global_embeddings, _ = extract_embeddings(
+            model, global_loader, device, args.target_node
         )
         
         # Save embeddings
@@ -369,13 +385,13 @@ def run_pipeline(args):
             # Extract embeddings from model
             logger.info("Extracting embeddings from model...")
             train_embeddings, train_labels = extract_embeddings(
-                model, inductive_train_loader, device, args.target_node
+                model, train_loader, device, args.target_node
             )
             global_embeddings, _ = extract_embeddings(
                 model, global_loader, device, args.target_node
             )
             val_embeddings, val_labels = extract_embeddings(
-                model, inductive_val_loader, device, args.target_node
+                model, val_loader, device, args.target_node
             )
             test_embeddings, test_labels = extract_embeddings(
                 model, test_loader, device, args.target_node

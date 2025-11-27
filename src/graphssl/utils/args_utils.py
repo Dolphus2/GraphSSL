@@ -175,7 +175,7 @@ def parse_args():
         "--num_neighbors",
         type=int,
         nargs="+",
-        default=[30]*2,
+        default=[15, 10],
         help="Number of neighbors to sample at each layer"
     )
     parser.add_argument(
@@ -201,6 +201,26 @@ def parse_args():
         action="store_false",
         dest="node_inductive",
         help="Disable node inductive learning for link prediction"
+    )
+    parser.add_argument(
+        "--dependent_node_edge_data_split",
+        action="store_true",
+        default=True,
+        help="Use dependent edge splits (control edges incident to split nodes for message passing)"
+    )
+    parser.add_argument(
+        "--no_dependent_node_edge_data_split",
+        action="store_false",
+        dest="dependent_node_edge_data_split",
+        help="Disable dependent edge splits"
+    )
+    parser.add_argument(
+        "--edge_msg_pass_prop",
+        type=float,
+        nargs=3,
+        default=[0.7, 0.7, 0.7],
+        metavar=("TRAIN", "VAL", "TEST"),
+        help="Proportion of edges incident to split nodes to keep for message passing (train, val, test). Only used with --dependent_node_edge_data_split"
     )
     
     # Training arguments
