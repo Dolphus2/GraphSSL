@@ -740,7 +740,7 @@ def run_downstream_evaluation(
         )
 
         # Create edge splits using the data object
-        train_edge_index, val_edge_index, test_edge_index = create_edge_splits(
+        _, _, _, train_edge_index, val_edge_index, test_edge_index = create_edge_splits(
             data=data,
             target_edge_type=target_edge_type,
             seed=args.seed,

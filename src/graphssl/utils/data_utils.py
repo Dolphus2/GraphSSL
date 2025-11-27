@@ -164,28 +164,14 @@ def create_link_loaders(
     logger.debug(f"  Negative sampling ratio: {neg_sampling_ratio}")
     logger.debug(f"  Node inductive: {node_inductive}")
     
-    torch.manual_seed(seed)
-    transform = T.RandomLinkSplit(
-        num_val=0.1,
-        num_test=0.1,
-        disjoint_train_ratio=0.3,
-        neg_sampling_ratio=0.0,
-        add_negative_train_samples=False,
-        edge_types=target_edge_type,
+    # Use create_edge_splits to get split datasets and edge indices
+    train_data_inductive, val_data_inductive, test_data, train_inductive_edge_index, val_inductive_edge_index, test_edge_index = create_edge_splits(
+        data=data,
+        target_edge_type=target_edge_type,
+        seed=seed,
+        node_inductive=node_inductive,
+        target_node_type=target_node_type
     )
-    train_data, val_data, test_data = transform(data)
-    
-    if node_inductive:
-        train_data_inductive = to_inductive(train_data.clone(), target_node_type)
-        val_data_inductive = val_to_inductive(val_data.clone(), target_node_type, seed)
-        logger.debug(f"  Applied node inductive transformation")
-    else:
-        train_data_inductive = train_data
-        val_data_inductive = train_data
-
-    train_inductive_edge_index = train_data_inductive[target_edge_type].edge_label_index
-    val_inductive_edge_index = val_data_inductive[target_edge_type].edge_label_index
-    test_edge_index = test_data[target_edge_type].edge_label_index
 
     logger.info(f"  Edge splits (seed={seed}): train={train_inductive_edge_index.size(1)}, "
                f"val={val_inductive_edge_index.size(1)}, test={test_edge_index.size(1)}")
@@ -275,7 +261,7 @@ def create_edge_splits(
     seed: int = 42,
     node_inductive: bool = False,
     target_node_type: str = "paper"
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> Tuple[HeteroData, HeteroData, HeteroData, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Split edge indices into train/val/test sets using RandomLinkSplit.
     
@@ -287,7 +273,7 @@ def create_edge_splits(
         target_node_type: Node type for inductive transformation (only used if node_inductive=True)
     
     Returns:
-        Tuple of (train_edge_index, val_edge_index, test_edge_index)
+        Tuple of (train_data, val_data, test_data, train_edge_index, val_edge_index, test_edge_index)
     """
     torch.manual_seed(seed)
     transform = T.RandomLinkSplit(
@@ -315,7 +301,7 @@ def create_edge_splits(
                 f"val={val_edge_index.size(1)}, "
                 f"test={test_edge_index.size(1)}")
     
-    return train_edge_index, val_edge_index, test_edge_index
+    return train_data, val_data, test_data, train_edge_index, val_edge_index, test_edge_index
 
 
 def subsample_dataset(
@@ -500,3 +486,81 @@ def val_to_inductive(data: HeteroData, node_type: str, seed: int = 42) -> Hetero
     _remap_and_filter_edges(data, node_type, node_mapping)
     
     return data
+
+
+def split_edges(
+    data: HeteroData,
+    target_edge_type: Tuple[str, str, str],
+    split: str,
+    edge_msg_pass_prop: float,
+    seed: int = 42
+) -> Tuple[HeteroData, torch.Tensor]:
+    """
+    Split edges incident to train/val/test nodes for message passing control.
+    
+    This is a post-processing step that finds all edges incident to nodes in a specific
+    split (train/val/test) and randomly removes (1 - edge_msg_pass_prop) of them from
+    the graph for message passing, storing them separately.
+    
+    Args:
+        data: HeteroData object
+        target_edge_type: Edge type tuple (src_type, relation, dst_type)
+        split: Which split to target ('train', 'val', or 'test')
+        edge_msg_pass_prop: Proportion of edges to keep for message passing (0.0 to 1.0)
+        seed: Random seed for reproducible splitting
+    
+    Returns:
+        Tuple of (data, split_edge_index) where:
+        - data: Modified HeteroData with edges removed
+        - split_edge_index: Edges removed from data
+    """
+    torch.manual_seed(seed)
+    
+    # Get the source and destination node types from the edge type
+    src_type, _, dst_type = target_edge_type
+    mask_attr = f"{split}_mask"
+    
+    split_mask_src = getattr(data[src_type], mask_attr, None) if hasattr(data[src_type], mask_attr) else None
+    split_mask_dst = getattr(data[dst_type], mask_attr, None) if hasattr(data[dst_type], mask_attr) else None
+    
+    edge_index = data[target_edge_type].edge_index
+    device = edge_index.device
+    
+    # Find edges incident to nodes in the specified split
+    # An edge is incident if either source or destination is in the split
+    incident_mask = torch.zeros(edge_index.size(1), dtype=torch.bool, device=device)
+    if split_mask_src is not None:
+        incident_mask |= split_mask_src[edge_index[0]]
+    if split_mask_dst is not None:
+        incident_mask |= split_mask_dst[edge_index[1]]
+    
+    # Get indices of edges incident to split nodes
+    incident_indices = incident_mask.nonzero(as_tuple=True)[0]
+    num_incident = incident_indices.size(0)
+    
+    if num_incident == 0:
+        logger.warning(f"No edges incident to {split} nodes found for {target_edge_type}")
+        return data, torch.empty((2, 0), dtype=torch.long, device=device)
+    
+    # Randomly shuffle incident edges
+    perm = torch.randperm(num_incident, generator=torch.Generator().manual_seed(seed), device=device)
+    shuffled_incident_indices = incident_indices[perm]
+    
+    num_msg_pass = int(num_incident * edge_msg_pass_prop)
+    num_split = num_incident - num_msg_pass
+
+    # Split indices: first num_msg_pass stay, rest are removed
+    split_indices = shuffled_incident_indices[num_msg_pass:]
+    keep_mask = torch.ones(edge_index.size(1), dtype=torch.bool, device=device)
+    keep_mask[split_indices] = False
+    
+    # Extract edges before removing them
+    split_edge_index = edge_index[:, split_indices]
+    
+    # Update edge_index in data (remove split edges)
+    data[target_edge_type].edge_index = edge_index[:, keep_mask]
+    
+    logger.debug(f"Split edges for {target_edge_type} (split={split}, seed={seed}, edge_msg_pass_prop={edge_msg_pass_prop}): "
+                f"incident={num_incident}, msg_pass={num_msg_pass}, removed={num_split}")
+    
+    return data, split_edge_index

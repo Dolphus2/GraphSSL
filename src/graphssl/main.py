@@ -129,11 +129,12 @@ def run_pipeline(args):
         )
         # Create edge splits for downstream link prediction evaluation
         target_edge_type = tuple(args.target_edge_type.split(","))
-        edge_splits = create_edge_splits(
+        _, _, _, train_edge_index, val_edge_index, test_edge_index = create_edge_splits(
             data=data,
             target_edge_type=target_edge_type,
             seed=args.seed
         )
+        edge_splits = (train_edge_index, val_edge_index, test_edge_index)
         logger.info(f"Edge splits created for downstream evaluation (seed={args.seed})")
     
     # ==================== Step 3: Create Training Objective ====================
