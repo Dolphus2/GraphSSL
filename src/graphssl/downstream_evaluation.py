@@ -11,7 +11,6 @@ from graphssl.utils.models import create_model
 from graphssl.utils.args_utils import parse_args
 
 logger = logging.getLogger(__name__)
-logger.setLevel("DEBUG")
 
 def run_pipeline(args):
     """Runs the GraphSSL downstream evaluation pipeline based on provided arguments."""
