@@ -185,7 +185,7 @@ def parse_args():
         "--num_neighbors",
         type=int,
         nargs="+",
-        default=[15, 10],
+        default=[30]*2,
         help="Number of neighbors to sample at each layer"
     )
     parser.add_argument(
@@ -249,7 +249,7 @@ def parse_args():
     parser.add_argument(
         "--weight_decay",
         type=float,
-        default=0.0,
+        default=0,
         help="Weight decay (L2 regularization)"
     )
     parser.add_argument(
@@ -356,7 +356,7 @@ def parse_args():
     parser.add_argument(
         "--downstream_weight_decay",
         type=float,
-        default=0.0,
+        default=0,
         help="Weight decay for downstream classifiers"
     )
     parser.add_argument(

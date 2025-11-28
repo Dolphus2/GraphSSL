@@ -1,7 +1,7 @@
 #!/bin/bash
-#BSUB -J gssl_downstream
-#BSUB -o logs/graphssl_downstream_%J.out
-#BSUB -e logs/graphssl_downstream_%J.err
+#BSUB -J gssl_ssl_edge
+#BSUB -o logs/exp_ssl_edge_%J.out
+#BSUB -e logs/exp_ssl_edge_%J.err
 #BSUB -q gpua100
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -n 4
@@ -11,12 +11,13 @@
 #BSUB -B 
 #BSUB -N 
 #
-# LSF script for running GraphSSL with downstream evaluation on DTU HPC
-# Configuration: Self-supervised node reconstruction with full downstream evaluation
-# Submit from GraphSSL root directory: bsub < scripts/hpc/hpc_run_downstream.sh
+# Experiment 4: Self-Supervised Edge Reconstruction
+# Training: Edge reconstruction with BCE loss (link prediction pretext task)
+# Encoder: GraphSAGE encoder with edge decoder
+# Submit: bsub < scripts/hpc/exp_ssl_edge.sh
 #
 
-echo "Starting GraphSSL Pipeline with Downstream Evaluation"
+echo "Starting Experiment: Self-Supervised Edge Reconstruction"
 echo "=============================================="
 echo "Job ID: $LSB_JOBID"
 echo "Hostname: $(hostname)"
@@ -52,16 +53,15 @@ echo "GPU Information:"
 nvidia-smi
 echo ""
 
-# Run the pipeline with sensible defaults
-# Configuration: Self-supervised node reconstruction with SCE loss
+# Run experiment
 python -m graphssl.main \
     --data_root data \
-    --results_root results/hpc_downstream_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
-    --objective_type self_supervised_node \
-    --loss_fn sce \
+    --results_root results/exp_ssl_edge_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
+    --objective_type self_supervised_edge \
+    --loss_fn bce \
     --target_node "paper" \
-    --target_edge_type "paper,has_topic,field_of_study" \
-    --mask_ratio 0.5 \
+    --target_edge_type "paper,cites,paper" \
+    --neg_sampling_ratio 1.0 \
     --hidden_channels 128 \
     --num_layers 2 \
     --num_neighbors 30 30 \
@@ -89,4 +89,3 @@ python -m graphssl.main \
 echo ""
 echo "Job completed at: $(date)"
 echo "=============================================="
-

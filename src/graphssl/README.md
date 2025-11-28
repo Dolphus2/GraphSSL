@@ -15,30 +15,13 @@ All experiments use GraphSAGE as the backbone encoder on the OGB-MAG dataset for
 
 ## Quick Start
 
-### Training on GPU
-
-Submit all experiments to HPC:
-
-```bash
-cd GraphSSL
-bash scripts/hpc/submit_all_experiments.sh
-```
-
-This submits 4 experiments in parallel, each running on a separate GPU.
 
 ### Testing on CPU
 
 Before GPU training, verify everything works:
 
 ```bash
-# Quick validation (10 seconds)
-python scripts/test/quick_validation.py
-
-# Full tests (10-30 minutes)
-bash scripts/test/run_all_tests.sh
-
-# Or run in background
-bash scripts/test/run_tests_background.sh
+bash scripts/test/quick_test.sh
 ```
 
 ## Architecture

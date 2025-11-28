@@ -1,90 +1,129 @@
 #!/bin/bash
 #
-# Example script to run the supervised learning pipeline on HPC
-# This script demonstrates different configurations for training
+# Example script to run different training objectives
+# This script demonstrates 5 different training configurations
 # Run from GraphSSL root directory: bash scripts/run_examples.sh
 #
-pwd
 
-echo "GraphSSL Supervised Learning Pipeline - Example Runs"
-echo "======================================================"
+echo "========================================="
+echo "GraphSSL Training Examples - 5 Scenarios"
+echo "========================================="
 
 # Create directories if they don't exist
 mkdir -p data
 mkdir -p results
 
-# Example 1: Quick test run with small model
+# Example 1: Supervised Node Classification (field_of_study edges)
 echo ""
-echo "Example 1: Quick test run (small model, few epochs)"
-echo "----------------------------------------------------"
-
+echo "Example 1: Supervised Node Classification (paper->field_of_study)"
+echo "-------------------------------------------------------------------"
 python -m graphssl.main \
     --data_root data \
-    --results_root results/quick_test \
+    --results_root results/ex1_supervised_node_fos \
     --objective_type supervised_node_classification \
-    --loss_fn sce \
-    --target_edge_type "paper,cites,paper" \
-    --hidden_channels 2 \
-    --num_layers 1 \
+    --target_node "paper" \
+    --target_edge_type "paper,has_topic,field_of_study" \
+    --hidden_channels 128 \
+    --num_layers 2 \
     --batch_size 1024 \
-    --epochs 1 \
+    --epochs 10 \
     --lr 0.001 \
     --patience 5 \
-    --extract_embeddings \
-    --downstream_task link \
-    --downstream_eval \
-    --test_mode
+    --skip_downstream
 
-# # Example 2: Standard training configuration
-# echo ""
-# echo "Example 2: Standard training configuration"
-# echo "-------------------------------------------"
-# python -m graphssl.main \
-#     --data_root data \
-#     --results_root results/standard \
-#     --hidden_channels 128 \
-#     --num_layers 2 \
-#     --batch_size 1024 \
-#     --epochs 100 \
-#     --lr 0.001 \
-#     --dropout 0.5 \
-#     --patience 10 \
-#     --extract_embeddings
+echo ""
+echo "========================================="
 
-# # Example 3: Large model with more capacity
-# echo ""
-# echo "Example 3: Large model configuration"
-# echo "-------------------------------------"
-# python -m graphssl.main \
-#     --data_root data \
-#     --results_root results/large_model \
-#     --hidden_channels 256 \
-#     --num_layers 3 \
-#     --batch_size 512 \
-#     --epochs 100 \
-#     --lr 0.001 \
-#     --dropout 0.5 \
-#     --weight_decay 1e-5 \
-#     --patience 15 \
-#     --extract_embeddings
+# Example 2: Supervised Link Prediction (citation edges)
+echo ""
+echo "Example 2: Supervised Link Prediction (paper->paper citations)"
+echo "---------------------------------------------------------------"
+python -m graphssl.main \
+    --data_root data \
+    --results_root results/ex2_supervised_link_cites \
+    --objective_type supervised_link_prediction \
+    --target_node "paper" \
+    --target_edge_type "paper,cites,paper" \
+    --hidden_channels 128 \
+    --num_layers 2 \
+    --batch_size 1024 \
+    --epochs 10 \
+    --lr 0.001 \
+    --neg_sampling_ratio 1.0 \
+    --patience 5 \
+    --skip_downstream
 
-# # Example 4: Smaller batch size for memory-constrained environments
-# echo ""
-# echo "Example 4: Memory-efficient configuration"
-# echo "------------------------------------------"
-# python -m graphssl.main \
-#     --data_root data \
-#     --results_root results/memory_efficient \
-#     --hidden_channels 128 \
-#     --num_layers 2 \
-#     --batch_size 256 \
-#     --num_neighbors 10 5 \
-#     --epochs 100 \
-#     --lr 0.001 \
-#     --dropout 0.5 \
-#     --patience 10
+echo ""
+echo "========================================="
 
-# echo ""
-# echo "======================================================"
-# echo "All example runs completed!"
-# echo "Check the results directory for outputs."
+# Example 3: Self-Supervised Node Reconstruction with SCE loss
+echo ""
+echo "Example 3: Self-Supervised Node (SCE loss, field_of_study edges)"
+echo "------------------------------------------------------------------"
+python -m graphssl.main \
+    --data_root data \
+    --results_root results/ex3_self_supervised_sce \
+    --objective_type self_supervised_node \
+    --loss_fn sce \
+    --target_node "paper" \
+    --target_edge_type "paper,has_topic,field_of_study" \
+    --mask_ratio 0.5 \
+    --hidden_channels 128 \
+    --num_layers 2 \
+    --batch_size 1024 \
+    --epochs 10 \
+    --lr 0.001 \
+    --patience 5 \
+    --skip_downstream
+
+echo ""
+echo "========================================="
+
+# Example 4: Self-Supervised Link Prediction (citation edges)
+echo ""
+echo "Example 4: Self-Supervised Edge Reconstruction (paper citations)"
+echo "------------------------------------------------------------------"
+python -m graphssl.main \
+    --data_root data \
+    --results_root results/ex4_self_supervised_edge \
+    --objective_type self_supervised_edge \
+    --target_node "paper" \
+    --target_edge_type "paper,cites,paper" \
+    --neg_sampling_ratio 1.0 \
+    --hidden_channels 128 \
+    --num_layers 2 \
+    --batch_size 1024 \
+    --epochs 10 \
+    --lr 0.001 \
+    --patience 5 \
+    --skip_downstream
+
+echo ""
+echo "========================================="
+
+# Example 5: Self-Supervised TAR + PFP (combined losses, field_of_study edges)
+echo ""
+echo "Example 5: Self-Supervised TAR + PFP (paper->field_of_study)"
+echo "--------------------------------------------------------------"
+python -m graphssl.main \
+    --data_root data \
+    --results_root results/ex5_tarpfp \
+    --objective_type self_supervised_tarpfp \
+    --target_node "paper" \
+    --target_edge_type "paper,has_topic,field_of_study" \
+    --lambda_tar 1.0 \
+    --lambda_pfp 1.0 \
+    --mask_ratio 0.5 \
+    --hidden_channels 128 \
+    --num_layers 2 \
+    --batch_size 1024 \
+    --epochs 10 \
+    --lr 0.001 \
+    --patience 5 \
+    --skip_downstream
+
+echo ""
+echo "========================================="
+echo "All 5 training examples completed!"
+echo "Results saved in results/ex*/ directories"
+echo "========================================="

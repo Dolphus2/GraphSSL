@@ -436,8 +436,10 @@ class SelfSupervisedNodeReconstruction(TrainingObjective):
         
         # Mask features (only during training)
         if is_training:
-            mask = torch.rand(original_features.size()) < self.mask_ratio # Check that this masks out a node completely
-            mask = mask.to(original_features.device)
+            num_nodes = original_features.size(0)
+            node_mask = torch.rand(num_nodes, device=original_features.device) < self.mask_ratio
+            # Expand to all features (columnwise masking)
+            mask = node_mask.unsqueeze(1).expand_as(original_features)
             batch.x_dict[self.target_node_type] = original_features.masked_fill(mask, 0.0)
         
         # Forward pass through encoder

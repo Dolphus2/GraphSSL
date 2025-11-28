@@ -20,7 +20,6 @@ import wandb
 
 
 logger = logging.getLogger(__name__)
-logger.setLevel("DEBUG")
 
 # I should really make things functional enough that I can use the train functions from training_utils,
 # but I can't be bothered right now. 
@@ -118,10 +117,14 @@ def train_downstream_model(
             model, objective, val_loader, device, disable_tqdm
         )
         
-        # Store history
+        # Store history (dynamically add new keys if they appear)
         for key, value in train_metrics.items():
+            if f"train_{key}" not in history:
+                history[f"train_{key}"] = []
             history[f"train_{key}"].append(value)
         for key, value in val_metrics.items():
+            if f"val_{key}" not in history:
+                history[f"val_{key}"] = []
             history[f"val_{key}"].append(value)
         
         # Early stopping (use 'acc' metric if available, otherwise use first metric)
@@ -199,7 +202,7 @@ def evaluate_downstream_model(
             elif key in total_metrics:
                 total_metrics[key] += value * batch_size
     
-    print(f"End of evaluation: total={total_metrics['total']}, type={type(total_metrics['total'])}, correct={total_metrics['correct']}, loss={total_metrics.get('loss', 0.0)}")
+    print(f"End of evaluation: total={total_metrics['total']}, correct={total_metrics['correct']}, loss={total_metrics.get('loss', 0.0)}")
     
     # Compute averages
     eval_metrics = {}
@@ -341,16 +344,22 @@ def evaluate_node_property_prediction(
         
         test_acc = test_metrics.get('acc', 0.0)
         test_loss = test_metrics.get('loss', 0.0)
+        test_precision = test_metrics.get('precision', 0.0)
+        test_recall = test_metrics.get('recall', 0.0)
+        
         test_accuracies.append(test_acc)
         test_losses.append(test_loss)
         
         if verbose:
-            logger.info(f"Run {run+1} - Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}")
+            logger.info(f"Run {run+1} - Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}, Precision: {test_precision:.4f}, Recall: {test_recall:.4f}")
         
-        # Log to wandb
+        # Log to wandb (including training history)
         wandb.log({
             f"downstream_node/run_{run+1}/test_loss": test_loss,
             f"downstream_node/run_{run+1}/test_acc": test_acc,
+            f"downstream_node/run_{run+1}/test_precision": test_precision,
+            f"downstream_node/run_{run+1}/test_recall": test_recall,
+            f"downstream_node/run_{run+1}/training_history": history,
         })
     
     # Compute statistics
@@ -360,7 +369,7 @@ def evaluate_node_property_prediction(
         'test_loss_mean': np.mean(test_losses),
         'test_loss_std': np.std(test_losses),
         'test_accuracies': test_accuracies,
-        'test_losses': test_losses
+        'test_losses': test_losses,
     }
     
     logger.info("\n" + "="*80)
@@ -569,16 +578,22 @@ def evaluate_link_prediction(
         
         test_acc = test_metrics.get('acc', 0.0)
         test_loss = test_metrics.get('loss', 0.0)
+        test_precision = test_metrics.get('precision', 0.0)
+        test_recall = test_metrics.get('recall', 0.0)
+        
         test_accuracies.append(test_acc)
         test_losses.append(test_loss)
         
         if verbose:
-            logger.info(f"Run {run+1} - Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}")
+            logger.info(f"Run {run+1} - Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}, Precision: {test_precision:.4f}, Recall: {test_recall:.4f}")
         
-        # Log to wandb
+        # Log to wandb (including training history)
         wandb.log({
             f"downstream_link/run_{run+1}/test_loss": test_loss,
             f"downstream_link/run_{run+1}/test_acc": test_acc,
+            f"downstream_link/run_{run+1}/test_precision": test_precision,
+            f"downstream_link/run_{run+1}/test_recall": test_recall,
+            f"downstream_link/run_{run+1}/training_history": history,
         })
     
     # Compute statistics
@@ -818,8 +833,10 @@ def evaluate_link_prediction_multiclass(
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_sparse_edges)
     
     # Store results from all runs
-    test_accuracies = []
+    test_f1_scores = []
     test_losses = []
+    test_precisions = []
+    test_recalls = []
     
     for run in range(n_runs):
         if verbose:
@@ -868,41 +885,61 @@ def evaluate_link_prediction_multiclass(
             decoder, objective, test_loader, device, disable_tqdm
         )
         
-        # Use F1 metric for multiclass link prediction (acc is actually F1 in this case)
+        # Extract metrics (acc is actually F1 in this case for multiclass)
         test_f1 = test_metrics.get('acc', 0.0)
         test_loss = test_metrics.get('loss', 0.0)
-        test_accuracies.append(test_f1)
+        test_precision = test_metrics.get('precision', 0.0)
+        test_recall = test_metrics.get('recall', 0.0)
+        
+        test_f1_scores.append(test_f1)
         test_losses.append(test_loss)
+        test_precisions.append(test_precision)
+        test_recalls.append(test_recall)
         
         if verbose:
-            logger.info(f"Run {run+1} - Test Loss: {test_loss:.4f}, Test F1: {test_f1:.4f}")
+            logger.info(f"Run {run+1} - Test Loss: {test_loss:.4f}, Test F1: {test_f1:.4f}, Precision: {test_precision:.4f}, Recall: {test_recall:.4f}")
         
-        # Log to wandb
+        # Log to wandb (including training history)
         wandb.log({
             f"downstream_link_multiclass/run_{run+1}/test_loss": test_loss,
             f"downstream_link_multiclass/run_{run+1}/test_f1": test_f1,
+            f"downstream_link_multiclass/run_{run+1}/test_precision": test_precision,
+            f"downstream_link_multiclass/run_{run+1}/test_recall": test_recall,
+            f"downstream_link_multiclass/run_{run+1}/training_history": history,
         })
     
     # Compute statistics
     results = {
-        'test_f1_mean': np.mean(test_accuracies),
-        'test_f1_std': np.std(test_accuracies),
+        'test_f1_mean': np.mean(test_f1_scores),
+        'test_f1_std': np.std(test_f1_scores),
         'test_loss_mean': np.mean(test_losses),
         'test_loss_std': np.std(test_losses),
-        'test_f1_scores': test_accuracies,
-        'test_losses': test_losses
+        'test_precision_mean': np.mean(test_precisions),
+        'test_precision_std': np.std(test_precisions),
+        'test_recall_mean': np.mean(test_recalls),
+        'test_recall_std': np.std(test_recalls),
+        'test_f1_scores': test_f1_scores,
+        'test_losses': test_losses,
+        'test_precisions': test_precisions,
+        'test_recalls': test_recalls,
     }
     
     logger.info("\n" + "="*80)
     logger.info("Link Prediction as Multiclass Results")
     logger.info("="*80)
     logger.info(f"Test F1: {results['test_f1_mean']:.4f} ± {results['test_f1_std']:.4f}")
+    logger.info(f"Test Precision: {results['test_precision_mean']:.4f} ± {results['test_precision_std']:.4f}")
+    logger.info(f"Test Recall: {results['test_recall_mean']:.4f} ± {results['test_recall_std']:.4f}")
     logger.info(f"Test Loss: {results['test_loss_mean']:.4f} ± {results['test_loss_std']:.4f}")
     
     # Log summary to wandb
     wandb.log({
         "downstream_link_multiclass/test_f1_mean": results['test_f1_mean'],
         "downstream_link_multiclass/test_f1_std": results['test_f1_std'],
+        "downstream_link_multiclass/test_precision_mean": results['test_precision_mean'],
+        "downstream_link_multiclass/test_precision_std": results['test_precision_std'],
+        "downstream_link_multiclass/test_recall_mean": results['test_recall_mean'],
+        "downstream_link_multiclass/test_recall_std": results['test_recall_std'],
         "downstream_link_multiclass/test_loss_mean": results['test_loss_mean'],
         "downstream_link_multiclass/test_loss_std": results['test_loss_std'],
     })
@@ -1103,44 +1140,8 @@ def run_downstream_evaluation(
         torch.save(node_results, node_results_path)
         logger.info(f"Node property prediction results saved to: {node_results_path}")
 
-    # Step 10b: Link prediction
-    if args.downstream_task in ["link", "both"]:
-        
-        # Apply test mode optimization if needed
-        if args.test_mode:
-            logger.info("Test mode enabled - using reduced settings for link prediction")
-        
-        link_results = evaluate_link_prediction(
-            model=model,
-            train_data=train_data,
-            val_data=val_data,
-            test_data=test_data,
-            train_edge_index=train_edge_index,
-            val_edge_index=val_edge_index,
-            test_edge_index=test_edge_index,
-            target_edge_type=target_edge_type,
-            device=device,
-            n_runs=args.downstream_n_runs,
-            num_neighbors=args.num_neighbors,
-            hidden_dim=args.downstream_hidden_dim,
-            dropout=args.downstream_dropout,
-            batch_size=args.downstream_batch_size,
-            lr=args.downstream_lr,
-            weight_decay=args.downstream_weight_decay,
-            num_epochs=args.downstream_link_epochs,
-            neg_sampling_ratio=args.neg_sampling_ratio,
-            early_stopping_patience=args.downstream_patience,
-            num_workers=args.num_workers,
-            verbose=True,
-            disable_tqdm=args.disable_tqdm
-        )
-
-        # Save link prediction results
-        link_results_path = results_path / "downstream_link_results.pt"
-        torch.save(link_results, link_results_path)
-        logger.info(f"Link prediction results saved to: {link_results_path}")
-    
-    # Step 10c: Link prediction as multiclass (only for paper -> field_of_study)
+    # Step 10b: Link prediction as multiclass (only for paper -> field_of_study)
+    # Run this first since it's much faster than regular link prediction
 
     target_edge_type = tuple(args.target_edge_type.split(","))
     if (args.downstream_task in ["link", "both", "multiclass_link"] and 
@@ -1185,4 +1186,41 @@ def run_downstream_evaluation(
         multiclass_results_path = results_path / "downstream_link_multiclass_results.pt"
         torch.save(multiclass_results, multiclass_results_path)
         logger.info(f"Link prediction multiclass results saved to: {multiclass_results_path}")
+
+    # Step 10c: Link prediction (regular - slower) This uses LinkNeighborLoader
+    if args.downstream_task in ["link", "both"]:
+        
+        # Apply test mode optimization if needed
+        if args.test_mode:
+            logger.info("Test mode enabled - using reduced settings for link prediction")
+        
+        link_results = evaluate_link_prediction(
+            model=model,
+            train_data=train_data,
+            val_data=val_data,
+            test_data=test_data,
+            train_edge_index=train_edge_index,
+            val_edge_index=val_edge_index,
+            test_edge_index=test_edge_index,
+            target_edge_type=target_edge_type,
+            device=device,
+            n_runs=args.downstream_n_runs,
+            num_neighbors=args.num_neighbors,
+            hidden_dim=args.downstream_hidden_dim,
+            dropout=args.downstream_dropout,
+            batch_size=args.downstream_batch_size,
+            lr=args.downstream_lr,
+            weight_decay=args.downstream_weight_decay,
+            num_epochs=args.downstream_link_epochs,
+            neg_sampling_ratio=args.neg_sampling_ratio,
+            early_stopping_patience=args.downstream_patience,
+            num_workers=args.num_workers,
+            verbose=True,
+            disable_tqdm=args.disable_tqdm
+        )
+
+        # Save link prediction results
+        link_results_path = results_path / "downstream_link_results.pt"
+        torch.save(link_results, link_results_path)
+        logger.info(f"Link prediction results saved to: {link_results_path}")
 
