@@ -1,4 +1,4 @@
-"""
+﻿"""
 GraphSSL: Supervised Learning Pipeline for OGB_MAG Dataset
 Venue prediction using heterogeneous GraphSAGE
 
@@ -24,12 +24,12 @@ from graphssl.utils.objective_utils import (
 )
 from graphssl.utils.downstream import (
     evaluate_node_property_prediction,
-    evaluate_link_prediction
+    evaluate_link_prediction,
+    evaluate_paper_field_multilabel,
 )
 import os
 os.environ["WANDB_MODE"] = "offline"
-# 或者
-os.environ["WANDB_DISABLED"] = "true"
+# 鎴栬€?os.environ["WANDB_DISABLED"] = "true"
 wandb.init(project="graphssl", mode="offline")
 logger = logging.getLogger(__name__)
 
@@ -93,8 +93,9 @@ def run_pipeline(args):
             batch_size=args.batch_size,
             neg_sampling_ratio=args.neg_sampling_ratio,
             num_workers=args.num_workers,
-            split_edges=True,
-            seed=args.seed
+            seed=args.seed,
+            train_ratio=args.train_ratio,
+            val_ratio=args.val_ratio
         )
         inductive_train_loader = None  # Not used for link prediction
         transductive_train_loader = train_loader
@@ -385,10 +386,9 @@ def run_pipeline(args):
         
         # Step 10b: Link Prediction
         if args.downstream_task in ["link", "both"]:
-            # For link prediction, we need edge indices
             target_edge_type = tuple(args.target_edge_type.split(","))
+            is_fos_special = target_edge_type == ("paper", "has_topic", "field_of_study")
             
-            # Use edge splits from Step 2 if available, otherwise create new splits
             if edge_splits is not None:
                 logger.info(f"Using edge splits from Step 2 for edge type: {target_edge_type}")
                 train_edge_index, val_edge_index, test_edge_index = edge_splits
@@ -396,21 +396,18 @@ def run_pipeline(args):
                 logger.info(f"Creating new edge splits for edge type: {target_edge_type}")
                 logger.warning("Edge splits not available from Step 2 - creating new splits with same seed")
                 
-                # Get full edge index and use create_edge_splits() function
                 full_edge_index = data[target_edge_type].edge_index
                 train_edge_index, val_edge_index, test_edge_index = create_edge_splits(
                     edge_index=full_edge_index,
                     train_ratio=0.8,
                     val_ratio=0.1,
-                    seed=args.seed
+                    seed=args.seed,
                 )
             if args.objective_type == "supervised_link_prediction":
 
                 print("Running FULL GRAPH inference for link prediction evaluation...")
                 data_gpu = data.to(device)
-                # Full graph inference
                 model.eval()
-                data_gpu = data.to(device)
                 with torch.no_grad():
                     out_dict, embeddings_dict = model(data_gpu.x_dict, data_gpu.edge_index_dict)
 
@@ -423,8 +420,8 @@ def run_pipeline(args):
                 else:
                     # If your link prediction uses a specific edge type
                     # You must select its src/dst type embeddings based on your data
-                    # Example: paper → embeddings_dict["paper"]
-                    raise ValueError("Please specify which node type's embeddings to evaluate for link prediction.")
+                    # Example: paper 鈫?embeddings_dict["paper"]
+                    full_embeddings = embeddings_dict[target_edge_type[0]]
 
                 print(f"[Full Graph] embeddings shape = {full_embeddings.shape}")
 
@@ -432,31 +429,71 @@ def run_pipeline(args):
                 train_embeddings = full_embeddings
                 val_embeddings = full_embeddings
                 test_embeddings = full_embeddings
-            link_results = evaluate_link_prediction(
-                train_embeddings=train_embeddings,
-                train_edge_index=train_edge_index,
-                val_embeddings=val_embeddings,
-                val_edge_index=val_edge_index,
-                test_embeddings=test_embeddings,
-                test_edge_index=test_edge_index,
-                device=device,
-                n_runs=args.downstream_n_runs,
-                num_neg_samples=args.downstream_neg_samples,
-                hidden_dim=args.downstream_hidden_dim,
-                num_layers=args.downstream_num_layers,
-                dropout=args.downstream_dropout,
-                batch_size=args.downstream_batch_size,
-                lr=args.downstream_lr,
-                weight_decay=args.downstream_weight_decay,
-                num_epochs=args.downstream_epochs,
-                early_stopping_patience=args.downstream_patience,
-                verbose=True
-            )
-            
-            # Save link prediction results
-            link_results_path = results_path / "downstream_link_results.pt"
-            torch.save(link_results, link_results_path)
-            logger.info(f"Link prediction results saved to: {link_results_path}")
+
+            if is_fos_special:
+                logger.info("Field-of-Study special case: remove paper↔field_of_study edges and do multi-label prediction.")
+                fos_removed = data.clone()
+                fos_removed[target_edge_type].edge_index = torch.empty(
+                    (2, 0), dtype=torch.long, device=data[target_edge_type].edge_index.device
+                )
+                fos_gpu = fos_removed.to(device)
+                model.eval()
+                with torch.no_grad():
+                    _, emb_dict = model(fos_gpu.x_dict, fos_gpu.edge_index_dict)
+                paper_embeddings = emb_dict["paper"].cpu()
+
+                fos_edge_index = data[target_edge_type].edge_index
+                num_papers = data["paper"].num_nodes
+                num_fields = data["field_of_study"].num_nodes
+                paper_field_labels = torch.zeros((num_papers, num_fields), dtype=torch.float)
+                paper_field_labels[fos_edge_index[0], fos_edge_index[1]] = 1.0
+
+                fos_results = evaluate_paper_field_multilabel(
+                    paper_embeddings=paper_embeddings,
+                    paper_field_labels=paper_field_labels,
+                    train_mask=data["paper"].train_mask.cpu(),
+                    val_mask=data["paper"].val_mask.cpu(),
+                    test_mask=data["paper"].test_mask.cpu(),
+                    device=device,
+                    n_runs=args.downstream_n_runs,
+                    hidden_dim=args.downstream_hidden_dim,
+                    num_layers=args.downstream_num_layers,
+                    dropout=args.downstream_dropout,
+                    batch_size=args.downstream_batch_size,
+                    lr=args.downstream_lr,
+                    weight_decay=args.downstream_weight_decay,
+                    num_epochs=args.downstream_epochs,
+                    early_stopping_patience=args.downstream_patience,
+                    verbose=True,
+                )
+                fos_results_path = results_path / "downstream_fos_results.pt"
+                torch.save(fos_results, fos_results_path)
+                logger.info(f"Field-of-Study results saved to: {fos_results_path}")
+            else:
+                link_results = evaluate_link_prediction(
+                    train_embeddings=train_embeddings,
+                    train_edge_index=train_edge_index,
+                    val_embeddings=val_embeddings,
+                    val_edge_index=val_edge_index,
+                    test_embeddings=test_embeddings,
+                    test_edge_index=test_edge_index,
+                    device=device,
+                    n_runs=args.downstream_n_runs,
+                    num_neg_samples=args.downstream_neg_samples,
+                    hidden_dim=args.downstream_hidden_dim,
+                    num_layers=args.downstream_num_layers,
+                    dropout=args.downstream_dropout,
+                    batch_size=args.downstream_batch_size,
+                    lr=args.downstream_lr,
+                    weight_decay=args.downstream_weight_decay,
+                    num_epochs=args.downstream_epochs,
+                    early_stopping_patience=args.downstream_patience,
+                    verbose=True
+                )
+                
+                link_results_path = results_path / "downstream_link_results.pt"
+                torch.save(link_results, link_results_path)
+                logger.info(f"Link prediction results saved to: {link_results_path}")
     
     # ==================== Final Summary ====================
     # Clean up wandb
@@ -625,6 +662,18 @@ def cli():
         type=int,
         default=4,
         help="Number of worker processes for data loading"
+    )
+    parser.add_argument(
+        "--train_ratio",
+        type=float,
+        default=0.8,
+        help="Train edge ratio for link prediction edge split"
+    )
+    parser.add_argument(
+        "--val_ratio",
+        type=float,
+        default=0.1,
+        help="Val edge ratio for link prediction edge split"
     )
     
     # Training arguments

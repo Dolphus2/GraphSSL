@@ -6,9 +6,9 @@ import logging
 import torch
 import torch_geometric.transforms as T
 from torch_geometric.datasets import OGB_MAG
-from torch_geometric.loader import NeighborLoader
+from torch_geometric.loader import NeighborLoader, LinkNeighborLoader
 from torch_geometric.data import HeteroData
-from typing import Tuple, Dict
+from typing import Tuple, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -133,111 +133,83 @@ def create_link_loaders(
     batch_size: int = 1024,
     neg_sampling_ratio: float = 1.0,
     num_workers: int = 4,
-    split_edges: bool = True,
-    seed: int = 42
-) -> Tuple[NeighborLoader, NeighborLoader, NeighborLoader, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    seed: int = 42,
+    train_ratio: float = 0.8,
+    val_ratio: float = 0.1,
+) -> Tuple[LinkNeighborLoader, LinkNeighborLoader, LinkNeighborLoader, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
     """
-    Create train, validation, and test NeighborLoaders for link prediction.
-    Edge labels are built on the fly inside the objective; loaders only provide
-    the corresponding edge_index subgraphs for each split.
-    
-    Args:
-        data: HeteroData object
-        target_edge_type: Edge type tuple (src_type, relation, dst_type) for link prediction
-        num_neighbors: Number of neighbors to sample at each layer [layer1, layer2, ...]
-        batch_size: Batch size for loading (number of seed nodes per batch)
-        neg_sampling_ratio: Ratio of negative to positive samples (kept for API parity)
-        num_workers: Number of worker processes for data loading
-        split_edges: Whether to split edges into train/val/test (80/10/10 split)
-        seed: Random seed for reproducible edge splitting
-    
-    Returns:
-        Tuple of (train_loader, val_loader, test_loader, edge_splits)
-        where edge_splits is (train_edge_index, val_edge_index, test_edge_index)
+    Create LinkNeighborLoaders for link prediction。
+    使用比例随机划分 train/val/test 边；目标边从消息传递图中移除，edge_label_index/edge_label 携带监督信号。
     """
-    logger.debug(f"Creating LinkNeighborLoaders with:")
+    logger.debug(f"Creating inductive LinkNeighborLoaders with:")
     logger.debug(f"  Target edge type: {target_edge_type}")
     logger.debug(f"  Neighbors per layer: {num_neighbors}")
     logger.debug(f"  Batch size: {batch_size}")
     logger.debug(f"  Negative sampling ratio: {neg_sampling_ratio}")
-    
-    # Get edge indices for target edge type
-    edge_index = data[target_edge_type].edge_index
-    num_edges = edge_index.size(1)
-    
-    # Split edges into train/val/test if requested
-    if split_edges:
-        train_edge_index, val_edge_index, test_edge_index = create_edge_splits(
 
-            edge_index=edge_index,
-            train_ratio=0.8,
-            val_ratio=0.1,
-            seed=seed
-        )
-
-        logger.info(f"  Edge splits (seed={seed}): train={train_edge_index.size(1)}, "
-                   f"val={val_edge_index.size(1)}, test={test_edge_index.size(1)}")
-    else:
-        # Use all edges for all splits (not recommended for evaluation)
-        train_edge_index = edge_index
-        val_edge_index = edge_index
-        test_edge_index = edge_index
-        logger.warning("Using all edges for train/val/test - this will cause data leakage!")
-    
-    # Helper to build input nodes dict for NeighborLoader
     src_type, _, dst_type = target_edge_type
 
-    def _input_nodes(edge_idx: torch.Tensor):
-        src_nodes = edge_idx[0].unique()
-        dst_nodes = edge_idx[1].unique()
-        if src_type == dst_type:
-            seeds = torch.unique(torch.cat([src_nodes, dst_nodes], dim=0))
-            return (src_type, seeds)
-        else:
-            return {src_type: src_nodes, dst_type: dst_nodes}
+    full_edge_index = data[target_edge_type].edge_index
 
-    # Create data copies for each split to avoid edge leakage
-    data_train = data.clone()
-    data_val = data.clone()
-    data_test = data.clone()
+    # 按比例随机切边
+    num_edges = full_edge_index.size(1)
+    generator = torch.Generator().manual_seed(seed)
+    perm = torch.randperm(num_edges, generator=generator)
+    shuffled = full_edge_index[:, perm]
+    train_size = int(train_ratio * num_edges)
+    val_size = int(val_ratio * num_edges)
+    train_edge_index = shuffled[:, :train_size]
+    val_edge_index = shuffled[:, train_size:train_size + val_size]
+    test_edge_index = shuffled[:, train_size + val_size:]
 
-    data_train[target_edge_type].edge_index = train_edge_index
-    data_val[target_edge_type].edge_index = val_edge_index
-    data_test[target_edge_type].edge_index = test_edge_index
+    logger.info(
+        f"  Inductive edge splits (seed={seed}): "
+        f"train={train_edge_index.size(1)}, val={val_edge_index.size(1)}, test={test_edge_index.size(1)}"
+    )
 
-    train_loader = NeighborLoader(
-        data_train,
+    # 构建消息传递图，移除目标边，其他保持原图（比例切分）
+    def _graph_without_target_edges() -> HeteroData:
+        g = data.clone()
+        g[target_edge_type].edge_index = torch.empty((2, 0), dtype=torch.long, device=full_edge_index.device)
+        return g
+
+    graph_train = _graph_without_target_edges()
+    graph_val = _graph_without_target_edges()
+    graph_test = _graph_without_target_edges()
+
+    train_loader = LinkNeighborLoader(
+        graph_train,
         num_neighbors=num_neighbors,
         batch_size=batch_size,
-        input_nodes=_input_nodes(train_edge_index),
-        num_workers=num_workers,
+        edge_label_index=(target_edge_type, train_edge_index),
+        edge_label=torch.ones(train_edge_index.size(1), device=full_edge_index.device),
+        neg_sampling_ratio=neg_sampling_ratio,
         shuffle=True,
+        num_workers=num_workers,
     )
 
-    val_loader = NeighborLoader(
-        data_val,
+    val_loader = LinkNeighborLoader(
+        graph_val,
         num_neighbors=num_neighbors,
         batch_size=batch_size,
-        input_nodes=_input_nodes(val_edge_index),
-        num_workers=num_workers,
+        edge_label_index=(target_edge_type, val_edge_index),
+        edge_label=torch.ones(val_edge_index.size(1), device=full_edge_index.device),
+        neg_sampling_ratio=neg_sampling_ratio,
         shuffle=False,
+        num_workers=num_workers,
     )
 
-    test_loader = NeighborLoader(
-        data_test,
+    test_loader = LinkNeighborLoader(
+        graph_test,
         num_neighbors=num_neighbors,
         batch_size=batch_size,
-        input_nodes=_input_nodes(test_edge_index),
-        num_workers=num_workers,
+        edge_label_index=(target_edge_type, test_edge_index),
+        edge_label=torch.ones(test_edge_index.size(1), device=full_edge_index.device),
+        neg_sampling_ratio=neg_sampling_ratio,
         shuffle=False,
+        num_workers=num_workers,
     )
 
-    logger.info("Link prediction loaders created successfully!")
-    logger.debug(f"  Train batches: ~{len(train_loader)}")
-    logger.debug(f"  Val batches: ~{len(val_loader)}")
-    logger.debug(f"  Test batches: ~{len(test_loader)}")
-    
-    # Return loaders and edge splits for downstream evaluation
     edge_splits = (train_edge_index, val_edge_index, test_edge_index)
     return train_loader, val_loader, test_loader, edge_splits
 
@@ -274,41 +246,29 @@ def create_edge_splits(
     edge_index: torch.Tensor,
     train_ratio: float = 0.8,
     val_ratio: float = 0.1,
-    seed: int = 42
+    seed: int = 42,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Split edge indices into train/val/test sets.
-    
-    Args:
-        edge_index: Edge indices [2, num_edges]
-        train_ratio: Ratio of edges for training (default: 0.8)
-        val_ratio: Ratio of edges for validation (default: 0.1)
-        seed: Random seed for reproducible splitting
-    
-    Returns:
-        Tuple of (train_edge_index, val_edge_index, test_edge_index)
+    ????????? train/val/test?
     """
     num_edges = edge_index.size(1)
-    
-    # Shuffle edges with fixed seed for reproducibility
     generator = torch.Generator().manual_seed(seed)
     perm = torch.randperm(num_edges, generator=generator)
     edge_index_shuffled = edge_index[:, perm]
-    
-    # Calculate split sizes
+
     train_size = int(train_ratio * num_edges)
     val_size = int(val_ratio * num_edges)
-    
-    # Split edges
+
     train_edge_index = edge_index_shuffled[:, :train_size]
     val_edge_index = edge_index_shuffled[:, train_size:train_size + val_size]
     test_edge_index = edge_index_shuffled[:, train_size + val_size:]
-    
-    logger.debug(f"Split {num_edges} edges (seed={seed}): "
-                f"train={train_edge_index.size(1)}, "
-                f"val={val_edge_index.size(1)}, "
-                f"test={test_edge_index.size(1)}")
-    
+
+    logger.debug(
+        f"Split {num_edges} edges (seed={seed}): "
+        f"train={train_edge_index.size(1)}, "
+        f"val={val_edge_index.size(1)}, "
+        f"test={test_edge_index.size(1)}"
+    )
     return train_edge_index, val_edge_index, test_edge_index
 
 

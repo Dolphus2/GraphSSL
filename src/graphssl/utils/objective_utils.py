@@ -150,37 +150,12 @@ class SupervisedLinkPrediction(TrainingObjective):
         src_type, _, dst_type = self.target_edge_type
 
         # Get edge indices and labels for target edge type
-        # NeighborLoader batches may not contain edge_label_index/edge_label, so build them if missing.
         edge_store = batch[self.target_edge_type]
         edge_label_index = getattr(edge_store, "edge_label_index", None)
         edge_label = getattr(edge_store, "edge_label", None)
 
         if edge_label_index is None or edge_label is None:
-            # Use current batch edges as positives
-            pos_edge_index = edge_store.edge_index
-            num_pos = pos_edge_index.size(1)
-
-            # Negative sampling: random pairs within current batch node ids
-            num_neg = int(self.negative_sampling_ratio * num_pos)
-            if num_neg > 0:
-                src_num_nodes = embeddings_dict[src_type].size(0)
-                dst_num_nodes = embeddings_dict[dst_type].size(0)
-                neg_src = torch.randint(0, src_num_nodes, (num_neg,), device=pos_edge_index.device)
-                neg_dst = torch.randint(0, dst_num_nodes, (num_neg,), device=pos_edge_index.device)
-                neg_edge_index = torch.stack([neg_src, neg_dst], dim=0)
-                edge_label_index = torch.cat([pos_edge_index, neg_edge_index], dim=1)
-                edge_label = torch.cat([
-                    torch.ones(num_pos, device=pos_edge_index.device),
-                    torch.zeros(num_neg, device=pos_edge_index.device)
-                ], dim=0)
-            else:
-                edge_label_index = pos_edge_index
-                edge_label = torch.ones(num_pos, device=pos_edge_index.device)
-
-            # Shuffle to avoid ordering bias
-            perm = torch.randperm(edge_label_index.size(1), device=edge_label_index.device)
-            edge_label_index = edge_label_index[:, perm]
-            edge_label = edge_label[perm]
+            raise ValueError("Link batches must contain edge_label_index and edge_label. Use LinkNeighborLoader with edge_label_* set.")
 
         if edge_label.numel() == 0:
             zero = torch.tensor(0.0, device=batch.x_dict[src_type].device, requires_grad=is_training)

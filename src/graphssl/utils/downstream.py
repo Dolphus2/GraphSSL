@@ -393,60 +393,59 @@ def evaluate_node_property_prediction(
 def create_link_prediction_data(
     embeddings: torch.Tensor,
     edge_index: torch.Tensor,
-    num_neg_samples: int = 1
+    num_neg_samples: int = 1,
+    all_positive_edges: Optional[torch.Tensor] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """
-    Create link prediction dataset from embeddings and edges.
-    
-    Args:
-        embeddings: Node embeddings [N, embedding_dim]
-        edge_index: Positive edges [2, num_edges]
-        num_neg_samples: Number of negative samples per positive edge
-    
-    Returns:
-        Tuple of (edge_features, edge_labels)
-        edge_features: [num_samples, 2*embedding_dim] concatenated node embeddings
-        edge_labels: [num_samples] binary labels (1 for positive, 0 for negative)
+    Create link prediction dataset from embeddings and edges。
+    负采样时显式避开所有已知正边（train+val+test）。
     """
     num_nodes = embeddings.shape[0]
     num_pos_edges = edge_index.shape[1]
-    
-    # Positive edge features (concatenate source and target embeddings)
+
     pos_src = embeddings[edge_index[0]]
     pos_dst = embeddings[edge_index[1]]
     pos_edge_features = torch.cat([pos_src, pos_dst], dim=1)
     pos_labels = torch.ones(num_pos_edges)
-    
-    # Generate negative edges (random pairs not in positive edges)
+
     num_neg_edges = num_pos_edges * num_neg_samples
-    
-    # Create set of positive edges for fast lookup
-    pos_edge_set = set(zip(edge_index[0].tolist(), edge_index[1].tolist()))
-    
+
+    # 构建禁止采样的正边集合
+    pos_forbidden = all_positive_edges if all_positive_edges is not None else edge_index
+    pos_edge_set = set(zip(pos_forbidden[0].tolist(), pos_forbidden[1].tolist()))
+
     neg_edges = []
-    while len(neg_edges) < num_neg_edges:
+    tries = 0
+    max_tries = num_neg_edges * 20 + 1000  # 简单防御，避免死循环
+    while len(neg_edges) < num_neg_edges and tries < max_tries:
         src = torch.randint(0, num_nodes, (1,)).item()
         dst = torch.randint(0, num_nodes, (1,)).item()
-        if src != dst and (src, dst) not in pos_edge_set:
-            neg_edges.append((src, dst))
-    
-    neg_edge_index = torch.tensor(neg_edges).t()
-    
-    # Negative edge features
+        tries += 1
+        if src == dst:
+            continue
+        if (src, dst) in pos_edge_set:
+            continue
+        neg_edges.append((src, dst))
+    if len(neg_edges) < num_neg_edges:
+        logger.warning(
+            f"Requested {num_neg_edges} negative edges, but only sampled {len(neg_edges)} "
+            f"before hitting max tries ({max_tries})."
+        )
+
+    neg_edge_index = torch.tensor(neg_edges).t() if neg_edges else torch.empty((2, 0), dtype=torch.long)
+
     neg_src = embeddings[neg_edge_index[0]]
     neg_dst = embeddings[neg_edge_index[1]]
-    neg_edge_features = torch.cat([neg_src, neg_dst], dim=1)
-    neg_labels = torch.zeros(num_neg_edges)
-    
-    # Combine positive and negative samples
+    neg_edge_features = torch.cat([neg_src, neg_dst], dim=1) if neg_edges else torch.empty((0, embeddings.size(1) * 2))
+    neg_labels = torch.zeros(len(neg_edges))
+
     edge_features = torch.cat([pos_edge_features, neg_edge_features], dim=0)
     edge_labels = torch.cat([pos_labels, neg_labels], dim=0)
-    
-    # Shuffle
+
     perm = torch.randperm(edge_features.shape[0])
     edge_features = edge_features[perm]
     edge_labels = edge_labels[perm]
-    
+
     return edge_features, edge_labels
 
 
@@ -505,10 +504,13 @@ def evaluate_link_prediction(
     logger.info(f"Embedding dim: {train_embeddings.shape[1]}")
     logger.info(f"Negative sampling ratio: {num_neg_samples}")
     logger.info(f"Running {n_runs} independent trials...")
-    
+
     # Store results from all runs
     test_accuracies = []
     test_losses = []
+
+    # 所有正边（用于负采样屏蔽）
+    all_positive_edges = torch.cat([train_edge_index, val_edge_index, test_edge_index], dim=1)
     
     for run in range(n_runs):
         if verbose:
@@ -516,13 +518,13 @@ def evaluate_link_prediction(
         
         # Create link prediction datasets (with different negative samples each run)
         train_features, train_labels = create_link_prediction_data(
-            train_embeddings, train_edge_index, num_neg_samples
+            train_embeddings, train_edge_index, num_neg_samples, all_positive_edges=all_positive_edges
         )
         val_features, val_labels = create_link_prediction_data(
-            val_embeddings, val_edge_index, num_neg_samples
+            val_embeddings, val_edge_index, num_neg_samples, all_positive_edges=all_positive_edges
         )
         test_features, test_labels = create_link_prediction_data(
-            test_embeddings, test_edge_index, num_neg_samples
+            test_embeddings, test_edge_index, num_neg_samples, all_positive_edges=all_positive_edges
         )
         
         # Create datasets and loaders
@@ -606,3 +608,173 @@ def evaluate_link_prediction(
     })
     
     return results
+
+
+def evaluate_paper_field_multilabel(
+    paper_embeddings: torch.Tensor,
+    paper_field_labels: torch.Tensor,
+    train_mask: torch.Tensor,
+    val_mask: torch.Tensor,
+    test_mask: torch.Tensor,
+    device: torch.device,
+    n_runs: int = 5,
+    hidden_dim: int = 128,
+    num_layers: int = 2,
+    dropout: float = 0.5,
+    batch_size: int = 1024,
+    lr: float = 0.001,
+    weight_decay: float = 0.0,
+    num_epochs: int = 50,
+    early_stopping_patience: int = 5,
+    threshold: float = 0.5,
+    verbose: bool = True,
+) -> Dict[str, Any]:
+    """
+    针对 paper→field_of_study 的特例：多标签分类（预测一篇论文关联的所有学科）。
+    """
+    num_fields = paper_field_labels.size(1)
+
+    def _split(tensor: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        return tensor[mask]
+
+    train_emb = _split(paper_embeddings, train_mask)
+    val_emb = _split(paper_embeddings, val_mask)
+    test_emb = _split(paper_embeddings, test_mask)
+    train_lab = _split(paper_field_labels, train_mask)
+    val_lab = _split(paper_field_labels, val_mask)
+    test_lab = _split(paper_field_labels, test_mask)
+
+    logger.info("=" * 80)
+    logger.info("Downstream Task: Paper→Field-of-Study (Multi-Label)")
+    logger.info("=" * 80)
+    logger.info(f"Train papers: {train_emb.shape[0]}, Val: {val_emb.shape[0]}, Test: {test_emb.shape[0]}")
+    logger.info(f"Fields of study: {num_fields}")
+
+    def _micro_f1(pred: torch.Tensor, label: torch.Tensor) -> float:
+        pred_bin = (pred > threshold).int()
+        tp = (pred_bin & label.int()).sum().item()
+        fp = (pred_bin & (1 - label.int())).sum().item()
+        fn = ((1 - pred_bin) & label.int()).sum().item()
+        precision = tp / (tp + fp + 1e-8)
+        recall = tp / (tp + fn + 1e-8)
+        if precision + recall == 0:
+            return 0.0
+        return 2 * precision * recall / (precision + recall)
+
+    results = {
+        "test_f1": [],
+        "test_loss": [],
+    }
+
+    for run in range(n_runs):
+        if verbose:
+            logger.info(f"\nRun {run + 1}/{n_runs}")
+
+        classifier = MLPClassifier(
+            input_dim=paper_embeddings.shape[1],
+            hidden_dim=hidden_dim,
+            output_dim=num_fields,
+            num_layers=num_layers,
+            dropout=dropout,
+            use_batchnorm=True,
+        ).to(device)
+
+        optimizer = torch.optim.Adam(classifier.parameters(), lr=lr, weight_decay=weight_decay)
+
+        train_dataset = TensorDataset(train_emb, train_lab)
+        val_dataset = TensorDataset(val_emb, val_lab)
+        test_dataset = TensorDataset(test_emb, test_lab)
+
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+        val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False)
+        test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+        best_val_f1 = 0.0
+        patience = 0
+
+        for epoch in range(num_epochs):
+            classifier.train()
+            total_loss = 0.0
+            total_samples = 0
+            for x, y in train_loader:
+                x, y = x.to(device), y.to(device)
+                optimizer.zero_grad()
+                logits = classifier(x)
+                loss = F.binary_cross_entropy_with_logits(logits, y.float())
+                loss.backward()
+                optimizer.step()
+                total_loss += loss.item() * x.size(0)
+                total_samples += x.size(0)
+
+            # 验证
+            classifier.eval()
+            with torch.no_grad():
+                all_logits = []
+                all_labels = []
+                for x, y in val_loader:
+                    x, y = x.to(device), y.to(device)
+                    logits = classifier(x)
+                    all_logits.append(logits.cpu())
+                    all_labels.append(y.cpu())
+                if all_logits:
+                    logits_cat = torch.cat(all_logits, dim=0)
+                    labels_cat = torch.cat(all_labels, dim=0)
+                    val_f1 = _micro_f1(torch.sigmoid(logits_cat), labels_cat)
+                else:
+                    val_f1 = 0.0
+
+            if val_f1 > best_val_f1:
+                best_val_f1 = val_f1
+                patience = 0
+                best_state = classifier.state_dict()
+            else:
+                patience += 1
+            if patience >= early_stopping_patience:
+                break
+
+        classifier.load_state_dict(best_state)
+        classifier.eval()
+        with torch.no_grad():
+            test_logits = []
+            test_labels = []
+            for x, y in test_loader:
+                x, y = x.to(device), y.to(device)
+                logits = classifier(x)
+                test_logits.append(logits.cpu())
+                test_labels.append(y.cpu())
+            if test_logits:
+                logits_cat = torch.cat(test_logits, dim=0)
+                labels_cat = torch.cat(test_labels, dim=0)
+                test_f1 = _micro_f1(torch.sigmoid(logits_cat), labels_cat)
+                test_loss = F.binary_cross_entropy_with_logits(logits_cat, labels_cat.float()).item()
+            else:
+                test_f1 = 0.0
+                test_loss = 0.0
+
+        results["test_f1"].append(test_f1)
+        results["test_loss"].append(test_loss)
+        wandb.log({
+            f"downstream_fos/run_{run+1}/test_f1": test_f1,
+            f"downstream_fos/run_{run+1}/test_loss": test_loss,
+        })
+
+    results_out = {
+        "test_f1_mean": float(np.mean(results["test_f1"])),
+        "test_f1_std": float(np.std(results["test_f1"])),
+        "test_loss_mean": float(np.mean(results["test_loss"])),
+        "test_loss_std": float(np.std(results["test_loss"])),
+        "test_f1_runs": results["test_f1"],
+        "test_loss_runs": results["test_loss"],
+    }
+    logger.info("\n" + "=" * 80)
+    logger.info("Paper→Field-of-Study Results")
+    logger.info("=" * 80)
+    logger.info(f"Test F1 (micro): {results_out['test_f1_mean']:.4f} ± {results_out['test_f1_std']:.4f}")
+    logger.info(f"Test Loss: {results_out['test_loss_mean']:.4f} ± {results_out['test_loss_std']:.4f}")
+    wandb.log({
+        "downstream_fos/test_f1_mean": results_out["test_f1_mean"],
+        "downstream_fos/test_f1_std": results_out["test_f1_std"],
+        "downstream_fos/test_loss_mean": results_out["test_loss_mean"],
+        "downstream_fos/test_loss_std": results_out["test_loss_std"],
+    })
+    return results_out
