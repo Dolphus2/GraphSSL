@@ -28,7 +28,6 @@ from graphssl.utils.downstream import (
 )
 from graphssl.utils.args_utils import parse_args, setup_logging_and_wandb
 
-logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 def run_pipeline(args):

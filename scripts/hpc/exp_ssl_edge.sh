@@ -60,7 +60,7 @@ python -m graphssl.main \
     --objective_type self_supervised_edge \
     --loss_fn bce \
     --target_node "paper" \
-    --target_edge_type "paper,cites,paper" \
+    --target_edge_type "paper,has_topic,field_of_study" \
     --neg_sampling_ratio 1.0 \
     --hidden_channels 128 \
     --num_layers 2 \
@@ -83,8 +83,9 @@ python -m graphssl.main \
     --downstream_node_epochs 100 \
     --downstream_link_epochs 10 \
     --downstream_patience 20 \
-    --edge_msg_pass_prop 0.8 0.8 0.8 \
-    --seed 42
+    --edge_msg_pass_prop 0 0 0 \
+    --seed 42 \
+    --disable_tqdm
 
 echo ""
 echo "Job completed at: $(date)"

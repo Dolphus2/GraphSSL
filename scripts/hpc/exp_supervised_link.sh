@@ -59,7 +59,7 @@ python -m graphssl.main \
     --results_root results/exp_supervised_link_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
     --objective_type supervised_link_prediction \
     --target_node "paper" \
-    --target_edge_type "paper,cites,paper" \
+    --target_edge_type "paper,has_topic,field_of_study" \
     --hidden_channels 128 \
     --num_layers 2 \
     --num_neighbors 30 30 \
@@ -82,8 +82,9 @@ python -m graphssl.main \
     --downstream_node_epochs 100 \
     --downstream_link_epochs 10 \
     --downstream_patience 20 \
-    --edge_msg_pass_prop 0.8 0.8 0.8 \
-    --seed 42
+    --edge_msg_pass_prop 0 0 0 \
+    --seed 42 \
+    --disable_tqdm
 
 echo ""
 echo "Job completed at: $(date)"

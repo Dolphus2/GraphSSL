@@ -83,8 +83,9 @@ python -m graphssl.main \
     --downstream_node_epochs 100 \
     --downstream_link_epochs 10 \
     --downstream_patience 20 \
-    --edge_msg_pass_prop 0.8 0.8 0.8 \
-    --seed 42
+    --edge_msg_pass_prop 0 0 0 \
+    --seed 42 \
+    --disable_tqdm
 
 echo ""
 echo "Job completed at: $(date)"
