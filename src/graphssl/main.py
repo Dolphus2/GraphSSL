@@ -6,17 +6,30 @@ Run with: python -m graphssl.main
 """
 import logging
 import torch
-import argparse
+import torch_geometric.transforms as T
 import wandb
-import time
 from pathlib import Path
 
-from graphssl.utils.data_utils import load_ogb_mag, create_neighbor_loaders, get_dataset_info
+from graphssl.utils.data_utils import load_ogb_mag, create_neighbor_loaders, create_link_loaders, get_dataset_info, \
+    extract_and_save_embeddings, create_edge_splits, subsample_dataset
 from graphssl.utils.models import create_model
 from graphssl.utils.training_utils import train_model, test_model, extract_embeddings
+from graphssl.utils.objective_utils import (
+    SupervisedNodeClassification,
+    SupervisedLinkPrediction,
+    SelfSupervisedNodeReconstruction,
+    SelfSupervisedEdgeReconstruction,
+    SelfSupervisedTARPFP,
+    EdgeDecoder,
+    FeatureDecoder
+)
+from graphssl.utils.downstream import (
+    run_downstream_evaluation
+)
+from graphssl.utils.args_utils import parse_args, setup_logging_and_wandb
 
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
-
 
 def run_pipeline(args):
     """
@@ -51,6 +64,29 @@ def run_pipeline(args):
         root_path=str(data_path),
         preprocess=args.preprocess
     )
+
+    if args.objective_type == "self_supervised_tarpfp" and args.lambda_pfp > 0:
+        # Load metapath2vec embeddings
+        metapath2vec_embeddings_path = data_path / "embeddings" / args.metapath2vec_embeddings_path
+        paper_pos = torch.load(metapath2vec_embeddings_path, map_location=device).detach().clone()
+        paper_pos.requires_grad = False
+
+        # Safety check
+        assert paper_pos.size(0) == data['paper'].num_nodes
+
+        # Attach as positional feature
+        data['paper'].pos = paper_pos
+        logger.info(f"Added paper.pos: {data['paper'].pos.shape}")
+    
+    # Subsample dataset in test mode for faster testing
+    if args.test_mode:
+        logger.info("Test mode: subsampling dataset for faster testing")
+        data = subsample_dataset(
+            data,
+            target_node_type=args.target_node,
+            max_nodes=args.test_max_nodes,  # Keep only 5000 nodes for quick testing
+            seed=args.seed
+        )
     
     # Get dataset information
     dataset_info = get_dataset_info(data, target_node_type=args.target_node)
@@ -65,17 +101,175 @@ def run_pipeline(args):
     print("Step 2: Creating Data Loaders")
     print("="*80)
     
-    inductive_train_loader, transductive_train_loader, val_loader, test_loader = create_neighbor_loaders(
-        data,
+    # Apply test mode optimizations
+    if args.test_mode:
+        # Reduce neighbor sampling for faster testing
+        if args.num_neighbors == [15, 10]:  # Only override if using defaults
+            args.num_neighbors = [10, 5]  # Much fewer neighbors
+            logger.info(f"Test mode: reducing num_neighbors to {args.num_neighbors}")
+        # Reduce downstream runs
+        if args.downstream_n_runs > 1:
+            args.downstream_n_runs = 1
+            logger.info(f"Test mode: reducing downstream_n_runs to 1")
+        # Reduce downstream epochs
+        if args.downstream_node_epochs > 3 or args.downstream_link_epochs > 3:
+            if args.downstream_node_epochs > 3: args.downstream_node_epochs = 3
+            if args.downstream_link_epochs > 3: args.downstream_link_epochs = 3
+            logger.info(f"Test mode: reducing downstream_node_epochs and downstream_link_epochs to 3")
+    
+    # Step 2a: Create edge/node splits
+    target_edge_type = tuple(args.target_edge_type.split(","))
+    train_data, val_data, test_data, train_edge_index, val_edge_index, test_edge_index = create_edge_splits(
+        data=data,
+        target_edge_type=target_edge_type,
+        seed=args.seed,
+        node_inductive=args.node_inductive,
+        target_node_type=args.target_node,
+        dependent=args.dependent_node_edge_data_split,
+        train_edge_msg_pass_prop=args.edge_msg_pass_prop[0],
+        val_edge_msg_pass_prop=args.edge_msg_pass_prop[1],
+        test_edge_msg_pass_prop=args.edge_msg_pass_prop[2]
+    )
+    edge_splits = (train_edge_index, val_edge_index, test_edge_index)
+    logger.info(f"Data splits created (seed={args.seed}): train={train_edge_index.size(1)}, val={val_edge_index.size(1)}, test={test_edge_index.size(1)}")
+    if args.node_inductive:
+        logger.info("Using node inductive learning")
+    
+    # Apply ToUndirected transform to original data for global loader
+    logger.debug("Applying ToUndirected transform to full dataset for global loader")
+    data = T.ToUndirected(merge=True)(data)
+    
+    # Step 2b: Create NeighborLoaders (for node embeddings)
+    train_loader, val_loader, test_loader, global_loader = create_neighbor_loaders(
+        train_data=train_data,
+        val_data=val_data,
+        test_data=test_data,
+        full_data=data,
         num_neighbors=args.num_neighbors,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         target_node_type=args.target_node
     )
     
-    # ==================== Step 3: Create Model ====================
+    # Step 2c: Create LinkNeighborLoaders for link-based objectives
+    # Default to using neighbor loaders for training
+    train_loader_for_training = train_loader
+    val_loader_for_training = val_loader
+    test_loader_for_testing = test_loader
+    
+    if args.objective_type == "supervised_link_prediction" or args.objective_type == "self_supervised_edge":
+        link_train_loader, link_val_loader, link_test_loader = create_link_loaders(
+            train_data=train_data,
+            val_data=val_data,
+            test_data=test_data,
+            train_edge_index=train_edge_index,
+            val_edge_index=val_edge_index,
+            test_edge_index=test_edge_index,
+            target_edge_type=target_edge_type,
+            num_neighbors=args.num_neighbors,
+            batch_size=args.batch_size,
+            neg_sampling_ratio=args.neg_sampling_ratio,
+            num_workers=args.num_workers
+        )
+        logger.info("LinkNeighborLoaders created for link-based objective")
+        # Override with link loaders for link-based objectives
+        train_loader_for_training = link_train_loader
+        val_loader_for_training = link_val_loader
+        test_loader_for_testing = link_test_loader
+    
+    # ==================== Step 3: Create Training Objective ====================
     print("\n" + "="*80)
-    print("Step 3: Creating Model")
+    print("Step 3: Creating Training Objective")
+    print("="*80)
+    
+    if args.objective_type == "supervised_node_classification":
+        objective = SupervisedNodeClassification(target_node_type=args.target_node)
+        logger.info(f"Objective: Supervised Node Classification on '{args.target_node}'")
+    
+    elif args.objective_type == "supervised_link_prediction":
+        target_edge_type = tuple(args.target_edge_type.split(","))
+        # Create optional edge decoder if specified
+        decoder = None
+        if args.use_edge_decoder:
+            decoder = EdgeDecoder(hidden_dim=args.hidden_channels, dropout=args.dropout)
+            logger.info("Using MLP-based edge decoder")
+        objective = SupervisedLinkPrediction(
+            target_edge_type=target_edge_type,
+            decoder=decoder
+        )
+        logger.info(f"Objective: Supervised Link Prediction on '{target_edge_type}'")
+    
+    elif args.objective_type == "self_supervised_node":
+        # Create optional feature decoder
+        decoder = None
+        if args.use_feature_decoder:
+            feature_dim = data[args.target_node].x.shape[1]
+            decoder = FeatureDecoder(
+                hidden_dim=args.hidden_channels,
+                feature_dim=feature_dim,
+                dropout=args.dropout
+            )
+            logger.info("Using MLP-based feature decoder")
+        objective = SelfSupervisedNodeReconstruction(
+            target_node_type=args.target_node,
+            mask_ratio=args.mask_ratio,
+            decoder=decoder,
+            loss_fn=args.loss_fn
+        )
+        logger.info(f"Objective: Self-Supervised Node Reconstruction on '{args.target_node}'")
+        logger.info(f"  Mask ratio: {args.mask_ratio}")
+    
+    elif args.objective_type == "self_supervised_edge":
+        target_edge_type = tuple(args.target_edge_type.split(","))
+        # Create optional edge decoder
+        decoder = None
+        if args.use_edge_decoder:
+            decoder = EdgeDecoder(hidden_dim=args.hidden_channels, dropout=args.dropout)
+            logger.info("Using MLP-based edge decoder")
+        objective = SelfSupervisedEdgeReconstruction(
+            target_edge_type=target_edge_type,
+            negative_sampling_ratio=args.neg_sampling_ratio,
+            decoder=decoder
+        )
+        logger.info(f"Objective: Self-Supervised Edge Reconstruction on '{target_edge_type}'")
+        logger.info(f"  Negative sampling ratio: {args.neg_sampling_ratio}")
+    elif args.objective_type == "self_supervised_tarpfp":
+        attr_dim = data[args.target_node].x.shape[1]
+        # optional decoder for TAR and PFP features, if needed
+        attr_decoder = FeatureDecoder(
+            hidden_dim=args.hidden_channels,
+            feature_dim=attr_dim,
+            dropout=args.dropout
+        )
+        if args.lambda_pfp > 0:
+            pos_dim = data[args.target_node].pos.shape[1]
+            pos_decoder = FeatureDecoder(
+                hidden_dim=args.hidden_channels,
+                feature_dim=pos_dim,
+                dropout=args.dropout
+            )
+        else:
+            pos_decoder = None
+        objective = SelfSupervisedTARPFP(
+            target_node_type=args.target_node,
+            attr_decoder=attr_decoder,
+            pos_decoder=pos_decoder,
+            mask_ratio_range=(0.2, 0.5),
+            leave_prob=0.1,
+            replace_prob=0.1,
+            mask_token=None,
+            lambda_tar=args.lambda_tar,
+            lambda_pfp=args.lambda_pfp,
+        )
+        logger.info(f"Objective: Self-Supervised TAR+PFP on '{args.target_node}'")
+        logger.info(f"  Lambda TAR: {args.lambda_tar}")
+        logger.info(f"  Lambda PFP: {args.lambda_pfp}")
+    else:
+        raise ValueError(f"Unknown objective type: {args.objective_type}")
+    
+    # ==================== Step 4: Create Model ====================
+    print("\n" + "="*80)
+    print("Step 4: Creating Model")
     print("="*80)
     
     model = create_model(
@@ -90,21 +284,27 @@ def run_pipeline(args):
     )
     model = model.to(device)
     
-    # ==================== Step 4: Setup Optimizer ====================
+    # ==================== Step 5: Setup Optimizer ====================
     print("\n" + "="*80)
-    print("Step 4: Setting up Optimizer")
+    print("Step 5: Setting up Optimizer")
     print("="*80)
+    if args.objective_type == "self_supervised_tarpfp":
+        params = list(model.parameters()) + list(attr_decoder.parameters())
+        if pos_decoder is not None and args.lambda_pfp > 0:
+            params += list(pos_decoder.parameters())
+    else:
+        params = model.parameters()
     
     optimizer = torch.optim.Adam(
-        model.parameters(),
+        params,
         lr=args.lr,
         weight_decay=args.weight_decay
     )
     logger.info(f"Optimizer: Adam (lr={args.lr}, weight_decay={args.weight_decay})")
     
-    # ==================== Step 5: Train Model ====================
+    # ==================== Step 6: Train Model ====================
     print("\n" + "="*80)
-    print("Step 5: Training Model")
+    print("Step 6: Training Model")
     print("="*80)
     
     # Create checkpoint directory
@@ -115,44 +315,46 @@ def run_pipeline(args):
     
     history = train_model(
         model=model,
-        train_loader=inductive_train_loader,
-        val_loader=val_loader,
+        train_loader=train_loader_for_training,
+        val_loader=val_loader_for_training,
         optimizer=optimizer,
+        objective=objective,
         device=device,
         num_epochs=args.epochs,
         log_interval=args.log_interval,
-        target_node_type=args.target_node,
         early_stopping_patience=args.patience,
         checkpoint_dir=str(checkpoint_dir),
-        verbose=True
+        verbose=True,
+        metric_for_best=args.metric_for_best,
+        disable_tqdm=args.disable_tqdm
     )
     
-    # ==================== Step 6: Test Model ====================
+    # ==================== Step 7: Test Model ====================
     print("\n" + "="*80)
-    print("Step 6: Testing Model")
+    print("Step 7: Testing Model")
     print("="*80)
     
-    test_loss, test_acc = test_model(
+    test_metrics = test_model(
         model=model,
-        test_loader=test_loader,
+        test_loader=test_loader_for_testing,
+        objective=objective,
         device=device,
-        target_node_type=args.target_node
+        disable_tqdm=args.disable_tqdm
     )
     
-    # ==================== Step 7: Save Results ====================
+    # ==================== Step 8: Save Results ====================
     print("\n" + "="*80)
-    print("Step 7: Saving Results")
+    print("Step 8: Saving Results")
     print("="*80)
     
-    # Results path was already created in Step 5
+    # Results path was already created in Step 6
     
     # Save final model with complete training information
-    model_path = results_path / "model_supervised.pt"
+    model_path = results_path / f"model_{args.objective_type}.pt"
     torch.save({
         'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
-        'test_acc': test_acc,
-        'test_loss': test_loss,
+        'test_metrics': test_metrics,
         'args': vars(args),
         'history': history
     }, model_path)
@@ -165,233 +367,63 @@ def run_pipeline(args):
     torch.save(history, history_path)
     logger.info(f"Training history saved to: {history_path}")
     
-    # ==================== Step 8: Extract Embeddings (Optional) ====================
+    # ==================== Step 9: Extract Embeddings (Optional) ====================
     if args.extract_embeddings:
         print("\n" + "="*80)
-        print("Step 8: Extracting Embeddings")
+        print("Step 9: Extracting Embeddings")
         print("="*80)
-        # Consider extracting embeddings once by running the model on the full graph.
         
-        logger.info("Extracting train embeddings...")
-        train_embeddings, train_labels = extract_embeddings(
-            model, transductive_train_loader, device, args.target_node
-        ) 
-        # Embeddings for inductive and transductive are not equivalent. 
-        # Transductive train embeddings contain information about val and test nodes as well 
-        # and so are appropriate for down stream tasks, where the graph has evolved further than test. 
-        
-        logger.info("Extracting val embeddings...")
-        val_embeddings, val_labels = extract_embeddings(
-            model, val_loader, device, args.target_node
-        )
-        
-        logger.info("Extracting test embeddings...")
-        test_embeddings, test_labels = extract_embeddings(
-            model, test_loader, device, args.target_node
-        )
-        
-        # Save embeddings
         embeddings_path = results_path / "embeddings.pt"
-        torch.save({
-            'train_embeddings': train_embeddings,
-            'train_labels': train_labels,
-            'val_embeddings': val_embeddings,
-            'val_labels': val_labels,
-            'test_embeddings': test_embeddings,
-            'test_labels': test_labels
-        }, embeddings_path)
-        logger.info(f"Embeddings saved to: {embeddings_path}")
-        logger.info(f"  Train embeddings shape: {train_embeddings.shape}")
-        logger.info(f"  Val embeddings shape: {val_embeddings.shape}")
-        logger.info(f"  Test embeddings shape: {test_embeddings.shape}")
+        embeddings_data = extract_and_save_embeddings(
+            model=model,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            test_loader=test_loader,
+            global_loader=global_loader,
+            device=device,
+            target_node_type=args.target_node,
+            embeddings_path=embeddings_path,
+            logger=logger,
+            disable_tqdm=args.disable_tqdm
+        )
+    
+    # ==================== Step 10: Downstream Evaluation (Optional) ====================
+    if args.downstream_eval:
+        print("\n" + "="*80)
+        print("Step 10: Downstream Evaluation")
+        print("="*80)
+        
+        run_downstream_evaluation(
+            args=args,
+            model=model,
+            train_data=train_data,
+            val_data=val_data,
+            test_data=test_data,
+            full_data=data,
+            edge_splits=edge_splits,
+            device=device,
+            results_path=results_path,
+            num_classes=dataset_info['num_classes']
+        )
     
     # ==================== Final Summary ====================
+    # Clean up wandb
+    wandb.finish()
     print("\n" + "="*80)
     print("Pipeline Completed Successfully!")
     print("="*80)
-    print(f"\nFinal Results:")
-    print(f"  Test Accuracy: {test_acc:.4f}")
-    print(f"  Test Loss: {test_loss:.4f}")
+    print(f"\nFinal Test Results:")
+    for metric, value in test_metrics.items():
+        print(f"  Test {metric.capitalize()}: {value:.4f}")
     print(f"\nAll outputs saved to: {results_path}")
     print("="*80)
 
 
+
 def cli():
     """Command-line interface for the GraphSSL pipeline."""
-    parser = argparse.ArgumentParser(
-        description="Supervised Learning Pipeline for OGB_MAG Venue Prediction"
-    )
-    
-    # Data arguments
-    parser.add_argument(
-        "--data_root",
-        type=str,
-        default="data",
-        help="Root directory for dataset storage"
-    )
-    parser.add_argument(
-        "--results_root",
-        type=str,
-        default="results",
-        help="Root directory for results"
-    )
-    parser.add_argument(
-        "--preprocess",
-        type=str,
-        default="metapath2vec",
-        choices=["metapath2vec", "transe"],
-        help="Preprocessing method for node embeddings"
-    )
-    parser.add_argument(
-        "--target_node",
-        type=str,
-        default="paper",
-        help="Target node type for prediction"
-    )
-    
-    # Model arguments
-    parser.add_argument(
-        "--hidden_channels",
-        type=int,
-        default=128,
-        help="Hidden dimension size"
-    )
-    parser.add_argument(
-        "--num_layers",
-        type=int,
-        default=2,
-        help="Number of GraphSAGE layers"
-    )
-    parser.add_argument(
-        "--aggr",
-        type=str,
-        default="mean",
-        choices=["mean", "sum", "max"],
-        help="Aggregator inside SAGEConv"
-    )
-    parser.add_argument(
-        "--aggr_rel",
-        type=str,
-        default="sum",
-        choices=["sum", "mean", "max"],
-        help="Aggregator for all relations"
-    )
-    parser.add_argument(
-        "--dropout",
-        type=float,
-        default=0.5,
-        help="Dropout rate"
-    )
-    parser.add_argument(
-        "--no_batchnorm",
-        action="store_false",
-        dest="use_batchnorm",
-        default=True,
-        help="Disable batch normalization"
-    )
-    
-    # Data loader arguments
-    parser.add_argument(
-        "--num_neighbors",
-        type=int,
-        nargs="+",
-        default=[15, 10],
-        help="Number of neighbors to sample at each layer"
-    )
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=1024,
-        help="Batch size for training"
-    )
-    parser.add_argument(
-        "--num_workers",
-        type=int,
-        default=4,
-        help="Number of worker processes for data loading"
-    )
-    
-    # Training arguments
-    parser.add_argument(
-        "--epochs",
-        type=int,
-        default=100,
-        help="Maximum number of training epochs"
-    )
-    parser.add_argument(
-        "--lr",
-        type=float,
-        default=0.001,
-        help="Learning rate"
-    )
-    parser.add_argument(
-        "--weight_decay",
-        type=float,
-        default=0.0,
-        help="Weight decay (L2 regularization)"
-    )
-    parser.add_argument(
-        "--patience",
-        type=int,
-        default=10,
-        help="Early stopping patience"
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for reproducibility"
-    )
-    
-    # Additional options
-    parser.add_argument(
-        "--log_interval",
-        type=int,
-        default=20,
-        help="Log metrics for each interval"
-    )    
-    parser.add_argument(
-        "--extract_embeddings",
-        action="store_true",
-        help="Extract and save node embeddings after training"
-    )
-    parser.add_argument(
-        "--log_level",
-        type=str,
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Logging level"
-    )
-    
-    args = parser.parse_args()
-    
-    # Configure logging
-    logging.basicConfig(
-        level=getattr(logging, args.log_level),
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        datefmt='%Y-%m-%d %H:%M:%S'
-    )
-
-    wandb.init(
-        project="graphssl",
-        name=f"graphssl_{int(time.time())}",
-        config={
-            "hidden_channels": args.hidden_channels,
-            "num_layers": args.num_layers,
-            "dropout": args.dropout,
-            "num_neighbors": args.num_neighbors,
-            "lr": args.lr,
-            "weight_decay": args.weight_decay,
-            "batch_size": args.batch_size,
-            "epochs": args.epochs,
-            "log_interval": args.log_interval,
-            "patience": args.patience,
-            "aggr": args.aggr,
-            "aggr_rel": args.aggr_rel,
-        }
-    )
-    
-    # Run pipeline
+    args = parse_args()
+    setup_logging_and_wandb(args)
     run_pipeline(args)
 
 

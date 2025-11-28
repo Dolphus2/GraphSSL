@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 class HomogeneousGraphSAGE(nn.Module):
     """
     Homogeneous GraphSAGE model (will be converted to heterogeneous).
+    Structured with separate encoder (GraphSAGE layers) and decoder (classifier).
     """
     def __init__(
         self,
@@ -39,25 +40,59 @@ class HomogeneousGraphSAGE(nn.Module):
         
         self.num_layers = num_layers
         self.use_batchnorm = use_batchnorm
-        self.dropout = nn.Dropout(p=dropout)
+        self.dropout_rate = dropout
         
-        # Create GraphSAGE layers
+        # Encoder: GraphSAGE convolution layers (flat structure for to_hetero)
         self.convs = nn.ModuleList()
         self.convs.append(SAGEConv(in_channels, hidden_channels, aggr=aggr))
         
-        for _ in range(num_layers - 2):
+        for _ in range(num_layers - 1):
             self.convs.append(SAGEConv(hidden_channels, hidden_channels, aggr=aggr))
         
-        self.convs.append(SAGEConv(hidden_channels, hidden_channels, aggr=aggr))
-        
-        # Create batch normalization layers
-        if self.use_batchnorm:
+        # Batch normalization layers
+        if use_batchnorm:
             self.batch_norms = nn.ModuleList()
             for _ in range(num_layers):
                 self.batch_norms.append(nn.BatchNorm1d(hidden_channels))
         
-        # Final classifier
-        self.lin = Linear(hidden_channels, out_channels)
+        self.dropout = nn.Dropout(p=dropout)
+        
+        # Decoder: Classification head
+        self.decoder = Linear(hidden_channels, out_channels)
+    
+    def encode(self, x, edge_index):
+        """
+        Encode nodes to embeddings using GraphSAGE layers.
+        
+        Args:
+            x: Node features
+            edge_index: Edge indices
+        
+        Returns:
+            Node embeddings
+        """
+        for i, conv in enumerate(self.convs):
+            x = conv(x, edge_index)
+            
+            if self.use_batchnorm:
+                x = self.batch_norms[i](x)
+            
+            x = F.relu(x)
+            x = self.dropout(x)
+        
+        return x
+    
+    def decode(self, embeddings):
+        """
+        Decode embeddings to predictions.
+        
+        Args:
+            embeddings: Node embeddings
+        
+        Returns:
+            Logits
+        """
+        return self.decoder(embeddings)
     
     def forward(self, x, edge_index):
         """
@@ -68,24 +103,15 @@ class HomogeneousGraphSAGE(nn.Module):
             edge_index: Edge indices
         
         Returns:
-            Node embeddings and logits
+            Tuple of (logits, embeddings)
         """
-        # Apply GraphSAGE layers
-        for i, conv in enumerate(self.convs):
-            x = conv(x, edge_index)
-            if self.use_batchnorm:
-                x = self.batch_norms[i](x)
-            if i < len(self.convs) - 1:
-                x = F.relu(x)
-                x = self.dropout(x)
+        # Encode: Generate embeddings
+        embeddings = self.encode(x, edge_index)
         
-        # Store embeddings before classification
-        embeddings = x
+        # Decode: Generate predictions
+        logits = self.decode(embeddings)
         
-        # Apply classifier
-        x = self.lin(x)
-        
-        return x, embeddings
+        return logits, embeddings
 
 
 class HeteroGraphSAGE(nn.Module):
@@ -144,10 +170,11 @@ class HeteroGraphSAGE(nn.Module):
             edge_index_dict: Dictionary of edge indices for each edge type
         
         Returns:
-            Logits for target node type and embeddings
+            Tuple of (out_dict, embeddings_dict) where both are dictionaries
+            containing outputs/embeddings for all node types
         """
-        out, embeddings = self.model(x_dict, edge_index_dict)
-        return out[self.target_node_type], embeddings[self.target_node_type]
+        out_dict, embeddings_dict = self.model(x_dict, edge_index_dict)
+        return out_dict, embeddings_dict
     
     def inference(self, x_dict, edge_index_dict):
         """
