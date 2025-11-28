@@ -1,18 +1,32 @@
 import logging
 import torch
-import argparse
+import torch_geometric.transforms as T
 import time
 import wandb
 from pathlib import Path
 
-from graphssl.utils.data_utils import load_ogb_mag, get_dataset_info
+from graphssl.utils.data_utils import load_ogb_mag, get_dataset_info, create_edge_splits
 from graphssl.utils.downstream import run_downstream_evaluation
+from graphssl.utils.models import create_model
+from graphssl.utils.args_utils import parse_args
 
 logger = logging.getLogger(__name__)
 
 def run_pipeline(args):
     """Runs the GraphSSL downstream evaluation pipeline based on provided arguments."""
     data_path = Path(args.data_root)
+    results_path = Path(args.results_root)
+    model_path = Path(args.model_path) if args.model_path else results_path / "model_supervised_node_classification.pt"
+    
+    # Check if model exists
+    if not model_path.exists():
+        raise FileNotFoundError(
+            f"Model not found at {model_path}. "
+            "Please train a model first or specify a valid model path using --model_path."
+        )
+    
+    logger.info(f"Loading model from: {model_path}")
+    
     # Load dataset
     data = load_ogb_mag(
         root_path=str(data_path),
@@ -29,308 +43,73 @@ def run_pipeline(args):
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     logger.info(f"Using device: {device}")
-
-    results_path = Path(args.results_root)
+    
+    # Create data splits based on seed
+    logger.info(f"Creating data splits with seed={args.seed}...")
+    target_edge_type = tuple(args.target_edge_type.split(","))
+    train_data, val_data, test_data, train_edge_index, val_edge_index, test_edge_index = create_edge_splits(
+        data=data,
+        target_edge_type=target_edge_type,
+        seed=args.seed,
+        node_inductive=True,
+        target_node_type=args.target_node,
+        dependent=True,
+        train_edge_msg_pass_prop=0.8,
+        val_edge_msg_pass_prop=0.1,
+        test_edge_msg_pass_prop=0.1
+    )
+    edge_splits = (train_edge_index, val_edge_index, test_edge_index)
+    logger.info(f"Data splits created: train={train_edge_index.size(1)}, val={val_edge_index.size(1)}, test={test_edge_index.size(1)}")
+    
+    # Apply ToUndirected transform to original data for downstream evaluation
+    logger.debug("Applying ToUndirected transform to full dataset")
+    data = T.ToUndirected(merge=True)(data)
+    
+    # Create model
+    logger.info("Initializing model...")
+    model = create_model(
+        data,
+        hidden_channels=args.hidden_channels,
+        num_layers=args.num_layers,
+        dropout=args.dropout,
+        use_batchnorm=args.use_batchnorm,
+        target_node_type=args.target_node,
+        aggr=args.aggr,
+        aggr_rel=args.aggr_rel
+    )
+    
+    # Load model weights
+    logger.info(f"Loading model weights from {model_path}...")
+    checkpoint = torch.load(model_path, map_location=device)
+    model.load_state_dict(checkpoint['model_state_dict'])
+    model = model.to(device)
+    model.eval()
+    logger.info("Model loaded successfully")
+    logger.info(f"Model was trained with args: {checkpoint.get('args', 'N/A')}")
+    logger.info(f"Model test metrics: {checkpoint.get('test_metrics', 'N/A')}")
 
     run_downstream_evaluation(
         args=args,
-        data=data,
+        model=model,
+        train_data=train_data,
+        val_data=val_data,
+        test_data=test_data,
+        full_data=data,
+        edge_splits=edge_splits,
         device=device,
         results_path=results_path,
         num_classes=dataset_info['num_classes'],
     )
 
+
 def cli():
-    """Command-line interface for the GraphSSL pipeline."""
-    parser = argparse.ArgumentParser(
-        description="Downstream Evaluation Pipeline for OGB_MAG"
-    )
+    """Command-line interface for the GraphSSL downstream evaluation pipeline."""
+    args = parse_args()
     
-    # Data arguments
-    parser.add_argument(
-        "--data_root",
-        type=str,
-        default="data",
-        help="Root directory for dataset storage"
-    )
-    parser.add_argument(
-        "--results_root",
-        type=str,
-        default="results",
-        help="Root directory for results"
-    )
-    parser.add_argument(
-        "--preprocess",
-        type=str,
-        default="metapath2vec",
-        choices=["metapath2vec", "transe"],
-        help="Preprocessing method for node embeddings"
-    )
-    parser.add_argument(
-        "--target_node",
-        type=str,
-        default="paper",
-        help="Target node type for prediction"
-    )
-    
-    # Objective arguments
-    parser.add_argument(
-        "--objective_type",
-        type=str,
-        default="supervised_node_classification",
-        choices=[
-            "supervised_node_classification",
-            "supervised_link_prediction",
-            "self_supervised_node",
-            "self_supervised_edge"
-        ],
-        help="Training objective type"
-    )
-    parser.add_argument(
-        "--loss_fn",
-        type=str,
-        default="mse",
-        choices=[
-            "mse",
-            "sce",
-            "mer",
-            "tar"
-        ],
-        help="loss function"
-    )
-    parser.add_argument(
-        "--target_edge_type",
-        type=str,
-        default="paper,cites,paper",
-        help="Target edge type for link prediction (comma-separated: src,relation,dst)"
-    )
-    parser.add_argument(
-        "--mask_ratio",
-        type=float,
-        default=0.5,
-        help="Feature masking ratio for self-supervised node reconstruction"
-    )
-    parser.add_argument(
-        "--neg_sampling_ratio",
-        type=float,
-        default=1.0,
-        help="Negative sampling ratio for link prediction"
-    )
-    parser.add_argument(
-        "--use_edge_decoder",
-        action="store_true",
-        help="Use MLP-based edge decoder for link prediction (default: dot product)"
-    )
-    parser.add_argument(
-        "--use_feature_decoder",
-        action="store_true",
-        help="Use MLP-based feature decoder for node reconstruction"
-    )
-    parser.add_argument(
-        "--metric_for_best",
-        type=str,
-        default="acc",
-        help="Metric to use for selecting best model (e.g., 'acc', 'loss')"
-    )
-    
-    # Model arguments
-    parser.add_argument(
-        "--hidden_channels",
-        type=int,
-        default=128,
-        help="Hidden dimension size"
-    )
-    parser.add_argument(
-        "--num_layers",
-        type=int,
-        default=2,
-        help="Number of GraphSAGE layers"
-    )
-    parser.add_argument(
-        "--aggr",
-        type=str,
-        default="mean",
-        choices=["mean", "sum", "max"],
-        help="Aggregator inside SAGEConv"
-    )
-    parser.add_argument(
-        "--aggr_rel",
-        type=str,
-        default="sum",
-        choices=["sum", "mean", "max"],
-        help="Aggregator for all relations"
-    )
-    parser.add_argument(
-        "--dropout",
-        type=float,
-        default=0.5,
-        help="Dropout rate"
-    )
-    parser.add_argument(
-        "--no_batchnorm",
-        action="store_false",
-        dest="use_batchnorm",
-        default=True,
-        help="Disable batch normalization"
-    )
-    
-    # Data loader arguments
-    parser.add_argument(
-        "--num_neighbors",
-        type=int,
-        nargs="+",
-        default=[30]*2,
-        help="Number of neighbors to sample at each layer"
-    )
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=1024,
-        help="Batch size for training"
-    )
-    parser.add_argument(
-        "--num_workers",
-        type=int,
-        default=4,
-        help="Number of worker processes for data loading"
-    )
-    
-    # Training arguments
-    parser.add_argument(
-        "--epochs",
-        type=int,
-        default=100,
-        help="Maximum number of training epochs"
-    )
-    parser.add_argument(
-        "--lr",
-        type=float,
-        default=0.001,
-        help="Learning rate"
-    )
-    parser.add_argument(
-        "--weight_decay",
-        type=float,
-        default=0.0,
-        help="Weight decay (L2 regularization)"
-    )
-    parser.add_argument(
-        "--patience",
-        type=int,
-        default=10,
-        help="Early stopping patience"
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for reproducibility"
-    )
-    
-    # Additional options
-    parser.add_argument(
-        "--log_interval",
-        type=int,
-        default=20,
-        help="Log metrics for each interval"
-    )    
-    parser.add_argument(
-        "--extract_embeddings",
-        action="store_true",
-        help="Extract and save node embeddings after training"
-    )
-    parser.add_argument(
-        "--log_level",
-        type=str,
-        default="INFO",
-        choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Logging level"
-    )
-    
-    # Downstream evaluation arguments
-    parser.add_argument(
-        "--downstream_eval",
-        action="store_true",
-        help="Run downstream evaluation tasks"
-    )
-    parser.add_argument(
-        "--downstream_task",
-        type=str,
-        default="both",
-        choices=["node", "link", "both"],
-        help="Downstream task type: node property prediction, link prediction, or both"
-    )
-    parser.add_argument(
-        "--downstream_n_runs",
-        type=int,
-        default=10,
-        help="Number of independent runs for downstream evaluation (for uncertainty estimation)"
-    )
-    parser.add_argument(
-        "--downstream_hidden_dim",
-        type=int,
-        default=128,
-        help="Hidden dimension for downstream MLP classifiers"
-    )
-    parser.add_argument(
-        "--downstream_num_layers",
-        type=int,
-        default=2,
-        help="Number of layers in downstream MLP classifiers"
-    )
-    parser.add_argument(
-        "--downstream_dropout",
-        type=float,
-        default=0.5,
-        help="Dropout rate for downstream classifiers"
-    )
-    parser.add_argument(
-        "--downstream_batch_size",
-        type=int,
-        default=1024,
-        help="Batch size for downstream classifier training"
-    )
-    parser.add_argument(
-        "--downstream_lr",
-        type=float,
-        default=0.001,
-        help="Learning rate for downstream classifiers"
-    )
-    parser.add_argument(
-        "--downstream_weight_decay",
-        type=float,
-        default=0.0,
-        help="Weight decay for downstream classifiers"
-    )
-    parser.add_argument(
-        "--downstream_epochs",
-        type=int,
-        default=100,
-        help="Maximum number of epochs for downstream classifier training"
-    )
-    parser.add_argument(
-        "--downstream_patience",
-        type=int,
-        default=10,
-        help="Early stopping patience for downstream classifiers"
-    )
-    parser.add_argument(
-        "--downstream_neg_samples",
-        type=int,
-        default=1,
-        help="Number of negative samples per positive edge for downstream link prediction"
-    )
-
-    parser.add_argument(
-        "--downstream_max_edges",
-        type=int,
-        default=2000,
-        help="Number of negative samples per positive edge for downstream link prediction"
-    )
-
-
-    
-    args = parser.parse_args()
+    # Add model_path argument specific to downstream evaluation
+    if not hasattr(args, 'model_path') or args.model_path is None:
+        # Default to results_root/model_supervised_node_classification.pt
+        args.model_path = None
     
     # Configure logging
     logging.basicConfig(
@@ -340,12 +119,13 @@ def cli():
     )
 
     wandb.init(
-        project="graphssl",
-        name=f"graphssl_downstream_test_{int(time.time())}",
+        project="graphssl-downstream",
+        name=f"downstream_eval_{args.downstream_task}_{int(time.time())}",
         config={
+            "seed": args.seed,
             "target_node": args.target_node,
             "target_edge_type": args.target_edge_type,
-            "downstream_eval": args.downstream_eval,
+            "model_path": args.model_path,
             "downstream_task": args.downstream_task,
             "downstream_n_runs": args.downstream_n_runs,
             "downstream_hidden_dim": args.downstream_hidden_dim,
@@ -356,10 +136,8 @@ def cli():
             "downstream_weight_decay": args.downstream_weight_decay,
             "downstream_epochs": args.downstream_epochs,
             "downstream_patience": args.downstream_patience,
-            "downstream_neg_samples": args.downstream_neg_samples,
         }
     )
-
 
     # Run pipeline
     run_pipeline(args)

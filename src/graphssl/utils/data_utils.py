@@ -3,12 +3,14 @@ Data loading utilities for OGB_MAG dataset
 """
 import os
 import logging
+from pathlib import Path
 import torch
 import torch_geometric.transforms as T
 from torch_geometric.datasets import OGB_MAG
 from torch_geometric.loader import NeighborLoader, LinkNeighborLoader
 from torch_geometric.data import HeteroData
 from typing import Tuple, Dict
+from graphssl.utils.training_utils import extract_embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -27,9 +29,8 @@ def load_ogb_mag(root_path: str, preprocess: str = "metapath2vec") -> HeteroData
     logger.info(f"Loading OGB_MAG dataset from {root_path}")
     logger.info(f"Using preprocessing method: {preprocess}")
     
-    # Load dataset with preprocessing
-    transform = T.ToUndirected(merge=True)
-    dataset = OGB_MAG(root=root_path, preprocess=preprocess, transform=transform)
+    # Load dataset with preprocessing (without ToUndirected - will be applied after edge splits)
+    dataset = OGB_MAG(root=root_path, preprocess=preprocess)
     data = dataset[0]
     
     logger.info("Dataset loaded successfully!")
@@ -231,6 +232,27 @@ def get_dataset_info(data: HeteroData, target_node_type: str = "paper") -> Dict:
     return info
 
 
+def get_reverse_edge_type(edge_type: Tuple[str, str, str]) -> Tuple[str, str, str] | None:
+    """
+    Determine the reverse edge type for a given edge type.
+    
+    Args:
+        edge_type: Edge type tuple (src_type, relation, dst_type)
+    
+    Returns:
+        Reverse edge type tuple, or None if src_type == dst_type (self-loop edges)
+    """
+    src_type, relation, dst_type = edge_type
+    
+    # If source and destination are the same, no reverse edge
+    if src_type == dst_type:
+        return None
+    
+    # Construct reverse edge type with "rev_" prefix
+    rev_relation = f"rev_{relation}"
+    return (dst_type, rev_relation, src_type)
+
+
 def create_edge_splits(
     data: HeteroData,
     target_edge_type: Tuple[str, str, str],
@@ -260,17 +282,18 @@ def create_edge_splits(
         Tuple of (train_data, val_data, test_data, train_edge_index, val_edge_index, test_edge_index)
     """
     torch.manual_seed(seed)
-    transform = T.RandomLinkSplit(
-        num_val=0.1,
-        num_test=0.1,
-        disjoint_train_ratio=0.3,
-        neg_sampling_ratio=0.0,
-        add_negative_train_samples=False,
-        edge_types=target_edge_type,
-    )
-    train_data, val_data, test_data = transform(data)
     
     if not dependent:
+        transform = T.RandomLinkSplit(
+            num_val=0.1,
+            num_test=0.1,
+            disjoint_train_ratio=0.3,
+            neg_sampling_ratio=0.0,
+            add_negative_train_samples=False,
+            edge_types=target_edge_type,
+            rev_edge_types=None,  # No reverse edges exist yet
+        )
+        train_data, val_data, test_data = transform(data.clone())
         # Independent edge splits: apply node inductive transformation if requested
         if node_inductive:
             logger.debug(f"Applying inductive transformation to edge splits (target_node_type={target_node_type})")
@@ -285,12 +308,12 @@ def create_edge_splits(
         logger.debug(f"Using dependent edge splits with message passing proportions: "
                     f"train={train_edge_msg_pass_prop}, val={val_edge_msg_pass_prop}, test={test_edge_msg_pass_prop}")
         
-        train_data_inductive = to_inductive(train_data, target_node_type)
+        train_data_inductive = to_inductive(data.clone(), target_node_type)
         
-        val_data_inductive = val_to_inductive(val_data, target_node_type, seed=seed)
+        val_data_inductive = val_to_inductive(data.clone(), target_node_type, seed=seed)
         
         # Test data keeps all nodes (no inductive transformation)
-        test_data_inductive = test_data
+        test_data_inductive = data.clone()
         
         # Split edges incident to train nodes from train_data
         train_data_inductive, train_edge_index = split_edges(
@@ -322,6 +345,13 @@ def create_edge_splits(
         train_data = train_data_inductive
         val_data = val_data_inductive
         test_data = test_data_inductive
+    
+    # Apply ToUndirected transform after edge splits to create reverse edges
+    logger.debug("Applying ToUndirected transform to create reverse edges after splitting")
+    to_undirected = T.ToUndirected(merge=True)
+    train_data = to_undirected(train_data)
+    val_data = to_undirected(val_data)
+    test_data = to_undirected(test_data)
     
     logger.debug(f"Split edges (seed={seed}, dependent={dependent}, node_inductive={node_inductive}): "
                 f"train={train_edge_index.size(1)}, "
@@ -601,7 +631,7 @@ def extract_and_save_embeddings(
     global_loader: NeighborLoader,
     device: torch.device,
     target_node_type: str,
-    embeddings_path: str,
+    embeddings_path: Path,
     logger: logging.Logger
 ) -> Dict:
     """
@@ -621,7 +651,6 @@ def extract_and_save_embeddings(
     Returns:
         Dictionary containing all embeddings and labels
     """
-    from graphssl.utils.training_utils import extract_embeddings
     
     logger.info("Extracting embeddings from model...")
     logger.info("Extracting train embeddings...")

@@ -7,15 +7,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
+from torch_geometric.loader import NeighborLoader, LinkNeighborLoader
 from graphssl.utils.data_utils import create_edge_splits, create_neighbor_loaders, create_link_loaders, extract_and_save_embeddings
 from graphssl.utils.training_utils import extract_embeddings
-from graphssl.utils.objective_utils import DownstreamNodeClassification, SupervisedLinkPrediction, EdgeDecoder
+from graphssl.utils.objective_utils import DownstreamNodeClassification, DownstreamLinkMulticlass, SupervisedLinkPrediction, EdgeDecoder
 from graphssl.utils.downstream_models import MLPClassifier
 from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 from tqdm import tqdm
 from pathlib import Path
 import wandb
+
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +70,8 @@ def train_downstream_model(
         train_total = 0
         
         for batch in train_loader:
-            # Move batch to device
             if isinstance(batch, (list, tuple)):
-                batch = tuple(b.to(device) for b in batch)
+                batch = tuple(b.to(device) if isinstance(b, torch.Tensor) else b for b in batch)
             else:
                 batch = batch.to(device)
             
@@ -88,8 +89,15 @@ def train_downstream_model(
             train_correct += batch_metrics['correct']
             train_total += batch_metrics['total']
         
-        train_loss /= train_total
-        train_acc = train_correct / train_total
+        print(f"End of epoch {epoch+1}: train_total={train_total}, type={type(train_total)}, train_correct={train_correct}, train_loss={train_loss}")
+        
+        if train_total == 0:
+            logger.warning(f"Epoch {epoch+1}: train_total is 0 - no samples processed in training")
+            train_loss = 0.0
+            train_acc = 0.0
+        else:
+            train_loss /= train_total
+            train_acc = train_correct / train_total
         
         # Validation
         val_loss, val_acc = evaluate_downstream_model(
@@ -147,21 +155,37 @@ def evaluate_downstream_model(
     total_loss = 0.0
     correct = 0
     total = 0
+    num_batches = 0
+    num_empty_batches = 0
     
     for batch in loader:
+        num_batches += 1
         # Move batch to device
         if isinstance(batch, (list, tuple)):
-            batch = tuple(b.to(device) for b in batch)
+            # Handle cases where batch contains tensors and non-tensors (e.g., integers)
+            batch = tuple(b.to(device) if isinstance(b, torch.Tensor) else b for b in batch)
         else:
             batch = batch.to(device)
         
         # Forward pass through objective
         _, batch_metrics = objective.step(model, batch, is_training=False)
         
+        # Track empty batches
+        if batch_metrics['total'] == 0:
+            num_empty_batches += 1
+        
         # Accumulate metrics
         total_loss += batch_metrics['loss'] * batch_metrics['total']
         correct += batch_metrics['correct']
         total += batch_metrics['total']
+    
+    print(f"End of evaluation: train_total={total}, type={type(total)}, train_correct={correct}, train_loss={total_loss}")
+    if total == 0:
+        logger.warning(f"Evaluation: total is 0 - processed {num_batches} batches, {num_empty_batches} had no edges")
+        return 0.0, 0.0
+    
+    if num_empty_batches > 0:
+        logger.info(f"Evaluation: {num_empty_batches}/{num_batches} batches had no edges (papers with no field_of_study)")
     
     avg_loss = total_loss / total
     accuracy = correct / total
@@ -545,6 +569,338 @@ def evaluate_link_prediction(
     return results
 
 
+def evaluate_link_prediction_multiclass(
+    model: torch.nn.Module,
+    train_data,
+    val_data,
+    test_data,
+    train_embeddings: torch.Tensor,
+    train_edge_index: torch.Tensor,
+    val_embeddings: torch.Tensor,
+    val_edge_index: torch.Tensor,
+    test_embeddings: torch.Tensor,
+    test_edge_index: torch.Tensor,
+    target_edge_type: Tuple[str, str, str],
+    device: torch.device,
+    n_runs: int = 10,
+    num_neighbors: list = [15, 10],
+    hidden_dim: int = 128,
+    num_layers: int = 2,
+    dropout: float = 0.5,
+    batch_size: int = 1024,
+    lr: float = 0.001,
+    weight_decay: float = 0.0,
+    num_epochs: int = 100,
+    early_stopping_patience: int = 10,
+    num_workers: int = 4,
+    verbose: bool = True
+) -> Dict[str, Any]:
+    """
+    Evaluate link prediction as multiclass classification.
+    Projects source node embeddings to target embedding space.
+    Predicts which target nodes (e.g., field_of_study) each source node (e.g., paper) links to.
+    Only uses edges from train/val/test_edge_index, not edges from the graph used for message passing.
+    
+    Args:
+        model: The trained encoder model (frozen)
+        train_data: Training data split (HeteroData, contains edges used for message passing)
+        val_data: Validation data split (HeteroData, contains edges used for message passing)
+        test_data: Test data split (HeteroData, contains edges used for message passing)
+        train_embeddings: Precomputed training embeddings for source nodes [N_train, hidden_dim]
+        train_edge_index: Training edges to predict [2, num_train_edges] where [0] are source indices, [1] are target indices
+        val_embeddings: Precomputed validation embeddings for source nodes [N_val, hidden_dim]
+        val_edge_index: Validation edges to predict [2, num_val_edges]
+        test_embeddings: Precomputed test embeddings for source nodes [N_test, hidden_dim]
+        test_edge_index: Test edges to predict [2, num_test_edges]
+        target_edge_type: Edge type tuple (src_type, relation, dst_type)
+        device: Device to train on
+        n_runs: Number of independent runs for uncertainty estimation
+        num_neighbors: Number of neighbors to sample at each layer
+        hidden_dim: Hidden dimension for decoder MLP
+        num_layers: Number of MLP layers
+        dropout: Dropout rate for decoder
+        batch_size: Batch size for training
+        lr: Learning rate for decoder
+        weight_decay: Weight decay for decoder
+        num_epochs: Maximum number of epochs per run
+        early_stopping_patience: Patience for early stopping
+        num_workers: Number of worker processes for data loading
+        verbose: Whether to print progress
+    
+    Returns:
+        Dictionary with mean and std of metrics across runs
+    """
+    
+    logger.info("="*80)
+    logger.info("Downstream Task: Link Prediction as Multiclass Classification")
+    logger.info("="*80)
+    logger.info(f"Target edge type: {target_edge_type}")
+    logger.info(f"Running {n_runs} independent trials...")
+    
+    # Extract node types from edge type
+    source_node_type = target_edge_type[0]
+    target_node_type = target_edge_type[2]
+    
+    # Get edges that were used for message passing during model training
+    # These edges should NOT be used as positive or negative examples
+    train_msg_passing_edges = train_data[target_edge_type].edge_index
+    val_msg_passing_edges = val_data[target_edge_type].edge_index
+    test_msg_passing_edges = test_data[target_edge_type].edge_index
+    
+    logger.info(f"Message passing edges - Train: {train_msg_passing_edges.size(1)}, Val: {val_msg_passing_edges.size(1)}, Test: {test_msg_passing_edges.size(1)}")
+    logger.info(f"Supervision edges - Train: {train_edge_index.size(1)}, Val: {val_edge_index.size(1)}, Test: {test_edge_index.size(1)}")
+    
+    # Extract embeddings for all target nodes (e.g., all field_of_study nodes)
+    logger.info(f"Extracting embeddings for all {target_node_type} nodes...")
+    model = model.to(device)
+    model.eval()
+    
+    # Create loader for target nodes
+    target_loader = NeighborLoader(
+        train_data,
+        num_neighbors=num_neighbors,
+        batch_size=batch_size,
+        input_nodes=(target_node_type, torch.arange(train_data[target_node_type].num_nodes)),
+        num_workers=num_workers,
+        shuffle=False
+    )
+    
+    # Extract target embeddings
+    target_embeddings_list = []
+    with torch.no_grad():
+        for batch in target_loader:
+            batch = batch.to(device)
+            _, embeddings_dict = model(batch.x_dict, batch.edge_index_dict)
+            target_batch_size = batch[target_node_type].batch_size
+            target_embeddings_list.append(
+                embeddings_dict[target_node_type][:target_batch_size].cpu()
+            )
+    
+    target_embeddings = torch.cat(target_embeddings_list, dim=0)
+    logger.info(f"Target embeddings shape: {target_embeddings.shape}")
+    
+    # Use precomputed source embeddings
+    logger.info(f"Using precomputed source node embeddings...")
+    logger.info(f"Train samples: {train_embeddings.shape[0]}")
+    logger.info(f"Val samples: {val_embeddings.shape[0]}")
+    logger.info(f"Test samples: {test_embeddings.shape[0]}")
+    logger.info(f"Embedding dim: {train_embeddings.shape[1]}")
+    logger.info(f"Number of target classes: {target_embeddings.shape[0]}")
+    
+    # Create custom dataset that returns edge indices per batch
+    logger.info("Creating edge-based datasets...")
+    
+    class EdgeIndexDataset(torch.utils.data.Dataset):
+        """
+        Dataset that returns embeddings and edge indices for multi-label classification.
+        Each batch contains all embeddings and the edges for those specific source nodes.
+        """
+        def __init__(self, embeddings, edge_index):
+            """
+            Args:
+                embeddings: Node embeddings [num_nodes, hidden_dim]
+                edge_index: Edge indices [2, num_edges] where [0] are source, [1] are target
+            """
+            self.embeddings = embeddings
+            self.edge_index = edge_index
+            self.num_nodes = embeddings.size(0)
+            
+        def __len__(self):
+            return self.num_nodes
+        
+        def __getitem__(self, idx):
+            # Return embedding and node index
+            return self.embeddings[idx], idx
+    
+    def build_edge_dict(edge_index):
+        """Build mapping from source node to list of target nodes."""
+        edge_dict = {}
+        for i in range(edge_index.size(1)):
+            src = int(edge_index[0, i].item())
+            tgt = int(edge_index[1, i].item())
+            if src not in edge_dict:
+                edge_dict[src] = []
+            edge_dict[src].append(tgt)
+        return edge_dict
+    
+    # Build supervision edge dicts (disjoint from message passing edges)
+    train_edge_dict = build_edge_dict(train_edge_index)
+    val_edge_dict = build_edge_dict(val_edge_index)
+    test_edge_dict = build_edge_dict(test_edge_index)
+    
+    # Build message passing edge dicts
+    train_msg_pass_edge_dict = build_edge_dict(train_msg_passing_edges)
+    val_msg_pass_edge_dict = build_edge_dict(val_msg_passing_edges)
+    test_msg_pass_edge_dict = build_edge_dict(test_msg_passing_edges)
+    
+    logger.info(f"Train nodes - supervision edges: {len(train_edge_dict)}, msg passing edges: {len(train_msg_pass_edge_dict)}")
+    logger.info(f"Val nodes - supervision edges: {len(val_edge_dict)}, msg passing edges: {len(val_msg_pass_edge_dict)}")
+    logger.info(f"Test nodes - supervision edges: {len(test_edge_dict)}, msg passing edges: {len(test_msg_pass_edge_dict)}")
+    
+    def collate_with_edges(batch, edge_dict, msg_pass_edge_dict):
+        """
+        Custom collate that includes supervision and message passing edge indices for the batch.
+        """
+        embeddings_list, indices_list = zip(*batch)
+        embeddings = torch.stack(embeddings_list, dim=0)
+        indices = torch.tensor(indices_list, dtype=torch.long)
+        
+        # Build supervision edge index for this batch
+        batch_edge_sources = []
+        batch_edge_targets = []
+        
+        for local_idx, global_idx in enumerate(indices):
+            global_idx = int(global_idx.item())
+            if global_idx in edge_dict:
+                for target_idx in edge_dict[global_idx]:
+                    batch_edge_sources.append(local_idx)
+                    batch_edge_targets.append(target_idx)
+        
+        if len(batch_edge_sources) > 0:
+            batch_edge_index = torch.tensor(
+                [batch_edge_sources, batch_edge_targets],
+                dtype=torch.long
+            )
+        else:
+            # Empty edge index
+            batch_edge_index = torch.zeros((2, 0), dtype=torch.long)
+        
+        # Build message passing edge index for this batch
+        msg_pass_batch_edge_sources = []
+        msg_pass_batch_edge_targets = []
+        
+        for local_idx, global_idx in enumerate(indices):
+            global_idx = int(global_idx.item())
+            if global_idx in msg_pass_edge_dict:
+                for target_idx in msg_pass_edge_dict[global_idx]:
+                    msg_pass_batch_edge_sources.append(local_idx)
+                    msg_pass_batch_edge_targets.append(target_idx)
+        
+        if len(msg_pass_batch_edge_sources) > 0:
+            msg_pass_batch_edge_index = torch.tensor(
+                [msg_pass_batch_edge_sources, msg_pass_batch_edge_targets],
+                dtype=torch.long
+            )
+        else:
+            # Empty edge index
+            msg_pass_batch_edge_index = torch.zeros((2, 0), dtype=torch.long)
+        
+        return embeddings, batch_edge_index, msg_pass_batch_edge_index, len(indices)
+    
+    # Create datasets
+    train_dataset = EdgeIndexDataset(train_embeddings, train_edge_index)
+    val_dataset = EdgeIndexDataset(val_embeddings, val_edge_index)
+    test_dataset = EdgeIndexDataset(test_embeddings, test_edge_index)
+    
+    # Create data loaders with custom collate functions
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        collate_fn=lambda batch: collate_with_edges(batch, train_edge_dict, train_msg_pass_edge_dict)
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=lambda batch: collate_with_edges(batch, val_edge_dict, val_msg_pass_edge_dict)
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        collate_fn=lambda batch: collate_with_edges(batch, test_edge_dict, test_msg_pass_edge_dict)
+    )
+    
+    # Store results from all runs
+    test_accuracies = []
+    test_losses = []
+    
+    for run in range(n_runs):
+        if verbose:
+            logger.info(f"\nRun {run+1}/{n_runs}")
+        
+        # Create decoder that projects source embeddings to target embedding space
+        decoder = MLPClassifier(
+            input_dim=train_embeddings.shape[1],
+            hidden_dim=hidden_dim,
+            output_dim=train_embeddings.shape[1],  # Project to same dimension
+            num_layers=num_layers,
+            dropout=dropout,
+            use_batchnorm=True
+        ).to(device)
+        
+        # Create objective
+        objective = DownstreamLinkMulticlass(
+            decoder=decoder,
+            target_embeddings=target_embeddings,
+            device=device
+        )
+        
+        # Create optimizer
+        optimizer = torch.optim.Adam(
+            decoder.parameters(),
+            lr=lr,
+            weight_decay=weight_decay
+        )
+        
+        # Train decoder
+        history = train_downstream_model(
+            model=decoder,
+            objective=objective,
+            train_loader=train_loader,
+            val_loader=val_loader,
+            optimizer=optimizer,
+            device=device,
+            num_epochs=num_epochs,
+            early_stopping_patience=early_stopping_patience,
+            verbose=verbose
+        )
+        
+        # Evaluate on test set
+        test_loss, test_f1 = evaluate_downstream_model(
+            decoder, objective, test_loader, device
+        )
+        
+        test_accuracies.append(test_f1)
+        test_losses.append(test_loss)
+        
+        if verbose:
+            logger.info(f"Run {run+1} - Test Loss: {test_loss:.4f}, Test F1: {test_f1:.4f}")
+        
+        # Log to wandb
+        wandb.log({
+            f"downstream_link_multiclass/run_{run+1}/test_loss": test_loss,
+            f"downstream_link_multiclass/run_{run+1}/test_f1": test_f1,
+        })
+    
+    # Compute statistics
+    results = {
+        'test_f1_mean': np.mean(test_accuracies),
+        'test_f1_std': np.std(test_accuracies),
+        'test_loss_mean': np.mean(test_losses),
+        'test_loss_std': np.std(test_losses),
+        'test_f1_scores': test_accuracies,
+        'test_losses': test_losses
+    }
+    
+    logger.info("\n" + "="*80)
+    logger.info("Link Prediction as Multiclass Results")
+    logger.info("="*80)
+    logger.info(f"Test F1: {results['test_f1_mean']:.4f} ± {results['test_f1_std']:.4f}")
+    logger.info(f"Test Loss: {results['test_loss_mean']:.4f} ± {results['test_loss_std']:.4f}")
+    
+    # Log summary to wandb
+    wandb.log({
+        "downstream_link_multiclass/test_f1_mean": results['test_f1_mean'],
+        "downstream_link_multiclass/test_f1_std": results['test_f1_std'],
+        "downstream_link_multiclass/test_loss_mean": results['test_loss_mean'],
+        "downstream_link_multiclass/test_loss_std": results['test_loss_std'],
+    })
+    
+    return results
+
+
 def run_downstream_evaluation(
     args,
     model,
@@ -694,4 +1050,45 @@ def run_downstream_evaluation(
         link_results_path = results_path / "downstream_link_results.pt"
         torch.save(link_results, link_results_path)
         logger.info(f"Link prediction results saved to: {link_results_path}")
+    
+    # Step 10c: Link prediction as multiclass (only for paper -> field_of_study)
+    target_edge_type_tuple = tuple(args.target_edge_type.split(","))
+    if (args.downstream_task in ["link", "both", "multiclass_link"] and 
+        target_edge_type_tuple == ("paper", "has_topic", "field_of_study")):
+        train_edge_index, val_edge_index, test_edge_index = edge_splits
+        
+        logger.info("="*80)
+        logger.info("Running link prediction as multiclass classification...")
+        logger.info("="*80)
+        multiclass_results = evaluate_link_prediction_multiclass(
+            model=model,
+            train_data=train_data,
+            val_data=val_data,
+            test_data=test_data,
+            train_embeddings=train_embeddings,
+            train_edge_index=train_edge_index,
+            val_embeddings=val_embeddings,
+            val_edge_index=val_edge_index,
+            test_embeddings=test_embeddings,
+            test_edge_index=test_edge_index,
+            target_edge_type=target_edge_type_tuple,
+            device=device,
+            n_runs=args.downstream_n_runs,
+            num_neighbors=args.num_neighbors,
+            hidden_dim=args.downstream_hidden_dim,
+            num_layers=args.downstream_num_layers,
+            dropout=args.downstream_dropout,
+            batch_size=args.downstream_batch_size,
+            lr=args.downstream_lr,
+            weight_decay=args.downstream_weight_decay,
+            num_epochs=args.downstream_epochs,
+            early_stopping_patience=args.downstream_patience,
+            num_workers=args.num_workers,
+            verbose=True
+        )
+        
+        # Save multiclass link prediction results
+        multiclass_results_path = results_path / "downstream_link_multiclass_results.pt"
+        torch.save(multiclass_results, multiclass_results_path)
+        logger.info(f"Link prediction multiclass results saved to: {multiclass_results_path}")
 

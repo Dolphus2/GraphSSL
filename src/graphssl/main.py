@@ -6,10 +6,12 @@ Run with: python -m graphssl.main
 """
 import logging
 import torch
+import torch_geometric.transforms as T
 import wandb
 from pathlib import Path
 
-from graphssl.utils.data_utils import load_ogb_mag, create_neighbor_loaders, create_link_loaders, get_dataset_info, create_edge_splits, subsample_dataset
+from graphssl.utils.data_utils import load_ogb_mag, create_neighbor_loaders, create_link_loaders, get_dataset_info, \
+    extract_and_save_embeddings, create_edge_splits, subsample_dataset
 from graphssl.utils.models import create_model
 from graphssl.utils.training_utils import train_model, test_model, extract_embeddings
 from graphssl.utils.objective_utils import (
@@ -26,7 +28,7 @@ from graphssl.utils.downstream import (
 from graphssl.utils.args_utils import parse_args, setup_logging_and_wandb
 
 logger = logging.getLogger(__name__)
-
+logger.setLevel("DEBUG")
 
 def run_pipeline(args):
     """
@@ -117,6 +119,10 @@ def run_pipeline(args):
     logger.info(f"Data splits created (seed={args.seed}): train={train_edge_index.size(1)}, val={val_edge_index.size(1)}, test={test_edge_index.size(1)}")
     if args.node_inductive:
         logger.info("Using node inductive learning")
+    
+    # Apply ToUndirected transform to original data for global loader
+    logger.debug("Applying ToUndirected transform to full dataset for global loader")
+    data = T.ToUndirected(merge=True)(data)
     
     # Step 2b: Create NeighborLoaders (for node embeddings)
     train_loader, val_loader, test_loader, global_loader = create_neighbor_loaders(
@@ -322,8 +328,6 @@ def run_pipeline(args):
         print("\n" + "="*80)
         print("Step 9: Extracting Embeddings")
         print("="*80)
-        
-        from graphssl.utils.data_utils import extract_and_save_embeddings
         
         embeddings_path = results_path / "embeddings.pt"
         embeddings_data = extract_and_save_embeddings(

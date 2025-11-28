@@ -29,6 +29,12 @@ def parse_args():
         help="Root directory for results"
     )
     parser.add_argument(
+        "--model_path",
+        type=str,
+        default=None,
+        help="Path to trained model checkpoint (for downstream evaluation, default: results_root/model_supervised_node_classification.pt)"
+    )
+    parser.add_argument(
         "--preprocess",
         type=str,
         default="metapath2vec",
@@ -97,7 +103,7 @@ def parse_args():
     parser.add_argument(
         "--target_edge_type",
         type=str,
-        default="paper, has_topic, field_of_study",
+        default="paper,has_topic,field_of_study",
         help="Target edge type for link prediction (comma-separated: src,relation,dst)"
     )
     parser.add_argument(
@@ -286,8 +292,8 @@ def parse_args():
         "--downstream_task",
         type=str,
         default="both",
-        choices=["node", "link", "both"],
-        help="Downstream task type: node property prediction, link prediction, or both"
+        choices=["node", "link", "both", "multiclass_link"],
+        help="Downstream task type: node property prediction, link prediction, both, or multiclass_link (paper->field_of_study)"
     )
     parser.add_argument(
         "--downstream_n_runs",

@@ -165,6 +165,154 @@ class DownstreamNodeClassification(TrainingObjective):
         return ["loss", "acc"]
 
 
+class DownstreamLinkMulticlass(TrainingObjective):
+    """
+    Downstream link prediction as multiclass classification.
+    Used for tasks like predicting field_of_study for papers by learning
+    to map paper embeddings to field_of_study embeddings.
+    """
+    
+    def __init__(
+        self,
+        decoder: torch.nn.Module,
+        target_embeddings: torch.Tensor,
+        device: torch.device
+    ):
+        """
+        Args:
+            decoder: MLP that projects source embeddings to target embedding space
+            target_embeddings: All target node embeddings [num_targets, hidden_dim]
+            device: Device for computation
+        """
+        super().__init__(target_node_type="embeddings")
+        self.decoder = decoder
+        self.target_embeddings = target_embeddings.to(device)
+        self.num_classes = target_embeddings.size(0)
+        self.eps = 1e-5
+        self.neg_weight = 1
+    
+    def step(
+        self,
+        model: torch.nn.Module,  # Not used, kept for interface compatibility
+        batch: Any,  # Tuple of (source_embeddings, edge_index, msg_pass_edge_index, num_source_nodes)
+        is_training: bool = True
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """
+        Forward pass and loss computation for multi-label link prediction.
+        
+        Args:
+            model: Not used (interface compatibility)
+            batch: Tuple of (source_embeddings, edge_index, msg_pass_edge_index, num_source_nodes)
+                   where edge_index[0] are source indices (relative to batch),
+                   edge_index[1] are target indices (global),
+                   msg_pass_edge_index contains edges used for message passing (to be masked out)
+            is_training: Whether in training mode
+        
+        Returns:
+            Tuple of (loss, metrics_dict)
+        """
+        source_embeddings, edge_index, msg_pass_edge_index, num_source_nodes = batch
+        batch_size = source_embeddings.size(0)
+        
+        # Decode source embeddings to target embedding space
+        projected_embeddings = self.decoder(source_embeddings)
+        
+        # Compute logits by dot product with all target embeddings
+        # [batch_size, hidden_dim] @ [hidden_dim, num_targets] = [batch_size, num_targets]
+        logits = torch.matmul(projected_embeddings, self.target_embeddings.T)
+        
+        # Apply sigmoid to get probabilities for adjacency matrix
+        Ahat = torch.sigmoid(logits)
+        
+        # Calculate pos_weight as (num_negative_edges / num_positive_edges)
+        num_positive_edges = edge_index.size(1)
+        num_negative_edges = batch_size * self.num_classes - num_positive_edges
+        pos_weight = num_negative_edges / (num_positive_edges + self.eps)
+        
+        # Get source and target indices from edge_index
+        src_idxs_local = edge_index[0]  # Source indices (batch-local)
+        trg_idxs_local = edge_index[1]  # Target indices (global)
+        
+        # Get message passing edge indices (to be masked out in loss)
+        msg_pass_src_idxs = msg_pass_edge_index[0] if msg_pass_edge_index.size(1) > 0 else None
+        msg_pass_trg_idxs = msg_pass_edge_index[1] if msg_pass_edge_index.size(1) > 0 else None
+        
+        # Compute negative log-likelihood loss
+        neg_likelihood = self.calculate_neg_log_likelihood(
+            Ahat, src_idxs_local, trg_idxs_local, pos_weight,
+            msg_pass_src_idxs, msg_pass_trg_idxs
+        )
+        loss = neg_likelihood.mean()
+        
+        # Compute metrics
+        # For multi-label, we compute precision/recall at a threshold
+        with torch.no_grad():
+            predictions = (Ahat > 0.5).float()
+            
+            # Create multi-hot target matrix
+            targets = torch.zeros(batch_size, self.num_classes, device=logits.device)
+            if edge_index.size(1) > 0:
+                targets[edge_index[0], edge_index[1]] = 1.0
+            
+            # True positives, false positives, false negatives
+            tp = (predictions * targets).sum()
+            fp = (predictions * (1 - targets)).sum()
+            fn = ((1 - predictions) * targets).sum()
+            
+            # Precision and recall
+            precision = tp / (tp + fp + 1e-10)
+            recall = tp / (tp + fn + 1e-10)
+            f1 = 2 * precision * recall / (precision + recall + 1e-10)
+        print(f" total is {int(targets.sum().item())}")
+        metrics = {
+            "loss": loss.item(),
+            "f1": f1.item(),
+            "precision": precision.item(),
+            "recall": recall.item(),
+            "correct": int(tp.item()),
+            "total": int(targets.sum().item())
+        }
+        
+        return loss, metrics
+    
+    def get_metric_names(self) -> list:
+        return ["loss", "f1", "precision", "recall"]
+    
+    def calculate_neg_log_likelihood(
+        self, 
+        Ahat, 
+        src_idxs_local, 
+        trg_idxs_local, 
+        pos_weight,
+        msg_pass_src_idxs=None,
+        msg_pass_trg_idxs=None
+    ) -> torch.Tensor:
+        """
+        Calculate negative log-likelihood loss with optional masking of message passing edges.
+        
+        Args:
+            Ahat: Predicted adjacency matrix probabilities [batch_size, num_targets]
+            src_idxs_local: Source indices for positive (supervision) edges
+            trg_idxs_local: Target indices for positive (supervision) edges
+            pos_weight: Weight for positive edges
+            msg_pass_src_idxs: Optional source indices for message passing edges to mask out
+            msg_pass_trg_idxs: Optional target indices for message passing edges to mask out
+        
+        Returns:
+            Negative log-likelihood loss tensor [batch_size, num_targets]
+        """
+        Ahat = 1 - Ahat  # assume all edges are negative
+        Ahat[src_idxs_local, trg_idxs_local] = (Ahat[src_idxs_local, trg_idxs_local] - 1) * (-1)  # Invert positive edges
+        neg_likelihood = (-torch.log(Ahat + self.eps))
+        neg_likelihood *= self.neg_weight
+        neg_likelihood[src_idxs_local, trg_idxs_local] *= (pos_weight * (1 / self.neg_weight))
+        
+        # Mask out message passing edges by setting their loss to 0
+        if msg_pass_src_idxs is not None and msg_pass_trg_idxs is not None:
+            neg_likelihood[msg_pass_src_idxs, msg_pass_trg_idxs] = 0.0
+        
+        return neg_likelihood
+
 class SupervisedLinkPrediction(TrainingObjective):
     """
     Supervised link prediction objective.
@@ -483,17 +631,48 @@ class SelfSupervisedEdgeReconstruction(TrainingObjective):
 
 class EdgeDecoder(torch.nn.Module):
     """
-    Simple MLP-based edge decoder for link prediction.
+    MLP-based edge decoder for link prediction with variable layers and batch normalization.
     """
     
-    def __init__(self, hidden_dim: int, dropout: float = 0.5):
+    def __init__(
+        self,
+        hidden_dim: int,
+        num_layers: int = 2,
+        dropout: float = 0.5,
+        use_batchnorm: bool = True
+    ):
+        """
+        Args:
+            hidden_dim: Hidden dimension for MLP layers
+            num_layers: Number of hidden layers
+            dropout: Dropout rate
+            use_batchnorm: Whether to use batch normalization
+        """
         super().__init__()
-        self.decoder = torch.nn.Sequential(
-            torch.nn.Linear(hidden_dim * 2, hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Dropout(dropout),
-            torch.nn.Linear(hidden_dim, 1)
-        )
+        
+        self.num_layers = num_layers
+        self.use_batchnorm = use_batchnorm
+        self.dropout_rate = dropout
+        
+        # Build MLP layers
+        self.layers = torch.nn.ModuleList()
+        self.batch_norms = torch.nn.ModuleList() if use_batchnorm else None
+        
+        # Input layer (concatenated src + dst embeddings)
+        input_dim = hidden_dim * 2
+        self.layers.append(torch.nn.Linear(input_dim, hidden_dim))
+        if use_batchnorm and self.batch_norms is not None:
+            self.batch_norms.append(torch.nn.BatchNorm1d(hidden_dim))
+        
+        # Hidden layers
+        for _ in range(num_layers - 1):
+            self.layers.append(torch.nn.Linear(hidden_dim, hidden_dim))
+            if use_batchnorm and self.batch_norms is not None:
+                self.batch_norms.append(torch.nn.BatchNorm1d(hidden_dim))
+        
+        # Output layer
+        self.output_layer = torch.nn.Linear(hidden_dim, 1)
+        self.dropout = torch.nn.Dropout(dropout)
     
     def forward(self, src_embeddings: torch.Tensor, dst_embeddings: torch.Tensor) -> torch.Tensor:
         """
@@ -507,8 +686,21 @@ class EdgeDecoder(torch.nn.Module):
             Edge scores [num_edges, 1]
         """
         # Concatenate source and destination embeddings
-        edge_features = torch.cat([src_embeddings, dst_embeddings], dim=-1)
-        return self.decoder(edge_features)
+        x = torch.cat([src_embeddings, dst_embeddings], dim=-1)
+        
+        # Pass through MLP layers
+        for i, layer in enumerate(self.layers):
+            x = layer(x)
+            
+            if self.use_batchnorm and self.batch_norms is not None:
+                x = self.batch_norms[i](x)
+            
+            x = F.relu(x)
+            x = self.dropout(x)
+        
+        # Output layer
+        x = self.output_layer(x)
+        return x
 
 
 class FeatureDecoder(torch.nn.Module):
