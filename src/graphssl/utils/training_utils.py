@@ -140,6 +140,7 @@ def train_epoch(
     model.train()
     
     # Initialize metric accumulators
+    objective.set_current_epoch(epoch)
     metric_names = objective.get_metric_names()
     total_metrics = _initialize_metrics(metric_names)
     running_metrics = _initialize_metrics(metric_names)

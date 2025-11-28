@@ -46,7 +46,14 @@ def parse_args():
         type=str,
         default="paper",
         help="Target node type for prediction"
+    )    
+    parser.add_argument(
+        "--metapath2vec_embeddings_path",
+        type=str,
+        default="embedding.pt",
+        help="Path to metapath2vec embeddings"
     )
+
     
     # Objective arguments
     parser.add_argument(
@@ -57,7 +64,8 @@ def parse_args():
             "supervised_node_classification",
             "supervised_link_prediction",
             "self_supervised_node",
-            "self_supervised_edge"
+            "self_supervised_edge",
+            "self_supervised_tarpfp",
         ],
         help="Training objective type"
     )
@@ -69,12 +77,8 @@ def parse_args():
             "mse",
             "sce",
             "bce",
-            "mer",
-            "tar",
-            "pfp",
-            "combined_loss"
         ],
-        help="Loss function for self-supervised learning. For node: mse/sce. For edge: bce/mer/tar/pfp/combined_loss"
+        help="Loss function for self-supervised learning. For node: mse/sce. For edge: bce"
     )
     parser.add_argument(
         "--mer_weight",
@@ -260,6 +264,18 @@ def parse_args():
         default=42,
         help="Random seed for reproducibility"
     )
+    parser.add_argument(
+        "--lambda_tar",
+        type=float,
+        default=1.0,
+        help="Lambda for TAR loss"
+    )
+    parser.add_argument(
+        "--lambda_pfp",
+        type=float,
+        default=0.0,
+        help="Lambda for PFP loss"
+    )
     
     # Additional options
     parser.add_argument(
@@ -380,6 +396,12 @@ def parse_args():
         dest="downstream_eval",
         help="Skip downstream evaluation entirely for fastest testing (only train the model)"
     )
+    parser.add_argument(
+        "--test_max_nodes",
+        type=int,
+        default=5000,
+        help="Maximum number of nodes to use for testing (only used in test mode)"
+    )
     
     return parser.parse_args()
 
@@ -419,10 +441,8 @@ def setup_logging_and_wandb(args):
             "use_feature_decoder": args.use_feature_decoder,
             "metric_for_best": args.metric_for_best,
             "loss_fn": args.loss_fn,
-            "mer_weight": args.mer_weight,
-            "tar_weight": args.tar_weight,
-            "pfp_weight": args.pfp_weight,
-            "tar_temperature": args.tar_temperature,
+            "lambda_tar": args.lambda_tar,
+            "lambda_pfp": args.lambda_pfp,
             "node_inductive": args.node_inductive,
             "downstream_eval": args.downstream_eval,
             "downstream_task": args.downstream_task,

@@ -19,6 +19,7 @@ from graphssl.utils.objective_utils import (
     SupervisedLinkPrediction,
     SelfSupervisedNodeReconstruction,
     SelfSupervisedEdgeReconstruction,
+    SelfSupervisedTARPFP,
     EdgeDecoder,
     FeatureDecoder
 )
@@ -63,6 +64,19 @@ def run_pipeline(args):
         root_path=str(data_path),
         preprocess=args.preprocess
     )
+
+    if args.objective_type == "self_supervised_tarpfp" and args.lambda_pfp > 0:
+        # Load metapath2vec embeddings
+        metapath2vec_embeddings_path = data_path / "embeddings" / args.metapath2vec_embeddings_path
+        paper_pos = torch.load(metapath2vec_embeddings_path, map_location=device).detach().clone()
+        paper_pos.requires_grad = False
+
+        # Safety check
+        assert paper_pos.size(0) == data['paper'].num_nodes
+
+        # Attach as positional feature
+        data['paper'].pos = paper_pos
+        logger.info(f"Added paper.pos: {data['paper'].pos.shape}")
     
     # Subsample dataset in test mode for faster testing
     if args.test_mode:
@@ -70,7 +84,7 @@ def run_pipeline(args):
         data = subsample_dataset(
             data,
             target_node_type=args.target_node,
-            max_nodes=5000,  # Keep only 5000 nodes for quick testing
+            max_nodes=args.test_max_nodes,  # Keep only 5000 nodes for quick testing
             seed=args.seed
         )
     
@@ -215,20 +229,41 @@ def run_pipeline(args):
         objective = SelfSupervisedEdgeReconstruction(
             target_edge_type=target_edge_type,
             negative_sampling_ratio=args.neg_sampling_ratio,
-            decoder=decoder,
-            loss_fn=args.loss_fn,
-            mer_weight=args.mer_weight,
-            tar_weight=args.tar_weight,
-            pfp_weight=args.pfp_weight,
-            tar_temperature=args.tar_temperature
+            decoder=decoder
         )
         logger.info(f"Objective: Self-Supervised Edge Reconstruction on '{target_edge_type}'")
-        logger.info(f"  Loss function: {args.loss_fn}")
         logger.info(f"  Negative sampling ratio: {args.neg_sampling_ratio}")
-        if args.loss_fn == "combined_loss":
-            logger.info(f"  Combined loss weights - MER: {args.mer_weight}, TAR: {args.tar_weight}, PFP: {args.pfp_weight}")
-            logger.info(f"  TAR temperature: {args.tar_temperature}")
-    
+    elif args.objective_type == "self_supervised_tarpfp":
+        attr_dim = data[args.target_node].x.shape[1]
+        # optional decoder for TAR and PFP features, if needed
+        attr_decoder = FeatureDecoder(
+            hidden_dim=args.hidden_channels,
+            feature_dim=attr_dim,
+            dropout=args.dropout
+        )
+        if args.lambda_pfp > 0:
+            pos_dim = data[args.target_node].pos.shape[1]
+            pos_decoder = FeatureDecoder(
+                hidden_dim=args.hidden_channels,
+                feature_dim=pos_dim,
+                dropout=args.dropout
+            )
+        else:
+            pos_decoder = None
+        objective = SelfSupervisedTARPFP(
+            target_node_type=args.target_node,
+            attr_decoder=attr_decoder,
+            pos_decoder=pos_decoder,
+            mask_ratio_range=(0.2, 0.5),
+            leave_prob=0.1,
+            replace_prob=0.1,
+            mask_token=None,
+            lambda_tar=args.lambda_tar,
+            lambda_pfp=args.lambda_pfp,
+        )
+        logger.info(f"Objective: Self-Supervised TAR+PFP on '{args.target_node}'")
+        logger.info(f"  Lambda TAR: {args.lambda_tar}")
+        logger.info(f"  Lambda PFP: {args.lambda_pfp}")
     else:
         raise ValueError(f"Unknown objective type: {args.objective_type}")
     
@@ -253,9 +288,15 @@ def run_pipeline(args):
     print("\n" + "="*80)
     print("Step 5: Setting up Optimizer")
     print("="*80)
+    if args.objective_type == "self_supervised_tarpfp":
+        params = list(model.parameters()) + list(attr_decoder.parameters())
+        if pos_decoder is not None and args.lambda_pfp > 0:
+            params += list(pos_decoder.parameters())
+    else:
+        params = model.parameters()
     
     optimizer = torch.optim.Adam(
-        model.parameters(),
+        params,
         lr=args.lr,
         weight_decay=args.weight_decay
     )
