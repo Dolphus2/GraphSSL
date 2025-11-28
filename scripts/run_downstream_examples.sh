@@ -18,12 +18,13 @@ python -m graphssl.downstream_evaluation \
     --target_edge_type "paper,cites,paper" \
     --downstream_lr 0.001 \
     --downstream_patience 5 \
-    --downstream_task both \
+    --downstream_task multiclass_link \
     --downstream_n_runs 5 \
     --downstream_hidden_dim 128 \
     --downstream_num_layers 1 \
     --downstream_batch_size 512 \
-    --downstream_epochs 5
+    --downstream_node_epochs 5 \
+    --downstream_link_epochs 5
 
 exit 1
 
@@ -43,7 +44,8 @@ python -m graphssl.main \
     --downstream_task both \
     --downstream_n_runs 5 \
     --downstream_hidden_dim 128 \
-    --downstream_epochs 50
+    --downstream_node_epochs 50 \
+    --downstream_link_epochs 10
 
 echo ""
 echo "=========================================="
@@ -106,7 +108,8 @@ python -m graphssl.main \
     --downstream_eval \
     --downstream_task both \
     --downstream_n_runs 3 \
-    --downstream_epochs 10 \
+    --downstream_node_epochs 10 \
+    --downstream_link_epochs 10 \
     --downstream_batch_size 256
 
 echo ""

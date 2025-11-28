@@ -38,7 +38,8 @@ python -m graphssl.main \
     --downstream_task both \
     --downstream_n_runs 2 \
     --downstream_hidden_dim 32 \
-    --downstream_epochs 3 \
+    --downstream_node_epochs 3 \
+    --downstream_link_epochs 3 \
     --downstream_batch_size 128 \
     --test_mode \
     --seed 42

@@ -274,6 +274,12 @@ def parse_args():
         help="Extract and save node embeddings after training"
     )
     parser.add_argument(
+        "--disable_tqdm",
+        action="store_true",
+        default=False,
+        help="Disable tqdm progress bars (useful for server/cluster runs)"
+    )
+    parser.add_argument(
         "--log_level",
         type=str,
         default="INFO",
@@ -338,10 +344,16 @@ def parse_args():
         help="Weight decay for downstream classifiers"
     )
     parser.add_argument(
-        "--downstream_epochs",
+        "--downstream_node_epochs",
         type=int,
         default=100,
-        help="Maximum number of epochs for downstream classifier training"
+        help="Maximum number of epochs for downstream node classification training"
+    )
+    parser.add_argument(
+        "--downstream_link_epochs",
+        type=int,
+        default=10, # Depending on the msg_pass_prop, there are a crap ton of links
+        help="Maximum number of epochs for downstream link prediction training"
     )
     parser.add_argument(
         "--downstream_patience",
@@ -421,7 +433,8 @@ def setup_logging_and_wandb(args):
             "downstream_batch_size": args.downstream_batch_size,
             "downstream_lr": args.downstream_lr,
             "downstream_weight_decay": args.downstream_weight_decay,
-            "downstream_epochs": args.downstream_epochs,
+            "downstream_node_epochs": args.downstream_node_epochs,
+            "downstream_link_epochs": args.downstream_link_epochs,
             "downstream_patience": args.downstream_patience,
             "downstream_neg_samples": args.downstream_neg_samples,
         }

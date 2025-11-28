@@ -167,9 +167,12 @@ class DownstreamNodeClassification(TrainingObjective):
 
 class DownstreamLinkMulticlass(TrainingObjective):
     """
-    Downstream link prediction as multiclass classification.
-    Used for tasks like predicting field_of_study for papers by learning
-    to map paper embeddings to field_of_study embeddings.
+    Downstream link prediction as multi-label classification.
+    Used for tasks like predicting field_of_study for papers.
+    Works with one-hot encoded labels where:
+      - label[i] = 1 if there's a supervision edge to target i
+      - label[i] = -1 if there's a message passing edge to target i (masked out in loss)
+      - label[i] = 0 otherwise (negative example)
     """
     
     def __init__(
@@ -188,13 +191,15 @@ class DownstreamLinkMulticlass(TrainingObjective):
         self.decoder = decoder
         self.target_embeddings = target_embeddings.to(device)
         self.num_classes = target_embeddings.size(0)
-        self.eps = 1e-5
-        self.neg_weight = 1
+        self.device = device
+        self.eps = 1e-10
+        self.neg_weight = 1.0
+        
     
     def step(
         self,
         model: torch.nn.Module,  # Not used, kept for interface compatibility
-        batch: Any,  # Tuple of (source_embeddings, edge_index, msg_pass_edge_index, num_source_nodes)
+        batch: Any,  # Tuple of (source_embeddings, pos_targets_list, msg_pass_targets_list)
         is_training: bool = True
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
         """
@@ -202,42 +207,29 @@ class DownstreamLinkMulticlass(TrainingObjective):
         
         Args:
             model: Not used (interface compatibility)
-            batch: Tuple of (source_embeddings, edge_index, msg_pass_edge_index, num_source_nodes)
-                   where edge_index[0] are source indices (relative to batch),
-                   edge_index[1] are target indices (global),
-                   msg_pass_edge_index contains edges used for message passing (to be masked out)
+            batch: Tuple of (source_embeddings, pos_targets_list, msg_pass_targets_list)
+                   where pos_targets_list and msg_pass_targets_list are lists of target tensors
             is_training: Whether in training mode
         
         Returns:
             Tuple of (loss, metrics_dict)
         """
-        source_embeddings, edge_index, msg_pass_edge_index, num_source_nodes = batch
+        source_embeddings, pos_targets_list, msg_pass_targets_list = batch
         batch_size = source_embeddings.size(0)
         
-        # Decode source embeddings to target embedding space
         projected_embeddings = self.decoder(source_embeddings)
-        
-        # Compute logits by dot product with all target embeddings
-        # [batch_size, hidden_dim] @ [hidden_dim, num_targets] = [batch_size, num_targets]
         logits = torch.matmul(projected_embeddings, self.target_embeddings.T)
-        
-        # Apply sigmoid to get probabilities for adjacency matrix
         Ahat = torch.sigmoid(logits)
+
+        src_idxs_local, trg_idxs_local = self.create_idxs_local(pos_targets_list)
+        msg_pass_src_idxs, msg_pass_trg_idxs = self.create_idxs_local(msg_pass_targets_list)
         
-        # Calculate pos_weight as (num_negative_edges / num_positive_edges)
-        num_positive_edges = edge_index.size(1)
-        num_negative_edges = batch_size * self.num_classes - num_positive_edges
-        pos_weight = num_negative_edges / (num_positive_edges + self.eps)
+        # Calculate positive weight
+        num_positive = src_idxs_local.size(0)
+        num_total = batch_size * self.num_classes
+        num_negative = num_total - num_positive - msg_pass_src_idxs.size(0)
+        pos_weight = num_negative / (num_positive + self.eps)
         
-        # Get source and target indices from edge_index
-        src_idxs_local = edge_index[0]  # Source indices (batch-local)
-        trg_idxs_local = edge_index[1]  # Target indices (global)
-        
-        # Get message passing edge indices (to be masked out in loss)
-        msg_pass_src_idxs = msg_pass_edge_index[0] if msg_pass_edge_index.size(1) > 0 else None
-        msg_pass_trg_idxs = msg_pass_edge_index[1] if msg_pass_edge_index.size(1) > 0 else None
-        
-        # Compute negative log-likelihood loss
         neg_likelihood = self.calculate_neg_log_likelihood(
             Ahat, src_idxs_local, trg_idxs_local, pos_weight,
             msg_pass_src_idxs, msg_pass_trg_idxs
@@ -245,35 +237,37 @@ class DownstreamLinkMulticlass(TrainingObjective):
         loss = neg_likelihood.mean()
         
         # Compute metrics
-        # For multi-label, we compute precision/recall at a threshold
         with torch.no_grad():
             predictions = (Ahat > 0.5).float()
+            tp = predictions[src_idxs_local, trg_idxs_local].sum().item()
+            fn = num_positive - tp
+            fp = predictions.sum().item() - tp
+            # Subtract false positives from message passing edges
+            if msg_pass_src_idxs.numel() > 0:
+                fp -= predictions[msg_pass_src_idxs, msg_pass_trg_idxs].sum().item()
             
-            # Create multi-hot target matrix
-            targets = torch.zeros(batch_size, self.num_classes, device=logits.device)
-            if edge_index.size(1) > 0:
-                targets[edge_index[0], edge_index[1]] = 1.0
-            
-            # True positives, false positives, false negatives
-            tp = (predictions * targets).sum()
-            fp = (predictions * (1 - targets)).sum()
-            fn = ((1 - predictions) * targets).sum()
-            
-            # Precision and recall
-            precision = tp / (tp + fp + 1e-10)
-            recall = tp / (tp + fn + 1e-10)
-            f1 = 2 * precision * recall / (precision + recall + 1e-10)
-        print(f" total is {int(targets.sum().item())}")
+            precision = tp / (tp + fp + self.eps)
+            recall = tp / (tp + fn + self.eps)
+            f1 = 2 * precision * recall / (precision + recall + self.eps)
+        
         metrics = {
             "loss": loss.item(),
-            "f1": f1.item(),
-            "precision": precision.item(),
-            "recall": recall.item(),
-            "correct": int(tp.item()),
-            "total": int(targets.sum().item())
+            "f1": f1,
+            "precision": precision,
+            "recall": recall,
+            "correct": int(tp),
+            "total": num_positive
         }
         
         return loss, metrics
+    
+    def create_idxs_local(self, targets_list):
+        src_idxs_local = torch.cat([
+            torch.full((len(indices),), i)
+            for i, indices in enumerate(targets_list)
+        ])
+        trg_idxs_local = torch.concatenate(targets_list)
+        return src_idxs_local, trg_idxs_local
     
     def get_metric_names(self) -> list:
         return ["loss", "f1", "precision", "recall"]
@@ -284,8 +278,8 @@ class DownstreamLinkMulticlass(TrainingObjective):
         src_idxs_local, 
         trg_idxs_local, 
         pos_weight,
-        msg_pass_src_idxs=None,
-        msg_pass_trg_idxs=None
+        msg_pass_src_idxs,
+        msg_pass_trg_idxs
     ) -> torch.Tensor:
         """
         Calculate negative log-likelihood loss with optional masking of message passing edges.
@@ -295,8 +289,8 @@ class DownstreamLinkMulticlass(TrainingObjective):
             src_idxs_local: Source indices for positive (supervision) edges
             trg_idxs_local: Target indices for positive (supervision) edges
             pos_weight: Weight for positive edges
-            msg_pass_src_idxs: Optional source indices for message passing edges to mask out
-            msg_pass_trg_idxs: Optional target indices for message passing edges to mask out
+            msg_pass_src_idxs: Source indices for message passing edges to mask out (may be empty)
+            msg_pass_trg_idxs: Target indices for message passing edges to mask out (may be empty)
         
         Returns:
             Negative log-likelihood loss tensor [batch_size, num_targets]
@@ -307,8 +301,8 @@ class DownstreamLinkMulticlass(TrainingObjective):
         neg_likelihood *= self.neg_weight
         neg_likelihood[src_idxs_local, trg_idxs_local] *= (pos_weight * (1 / self.neg_weight))
         
-        # Mask out message passing edges by setting their loss to 0
-        if msg_pass_src_idxs is not None and msg_pass_trg_idxs is not None:
+        # Mask out message passing edges by setting their loss to 0 (if any exist)
+        if msg_pass_src_idxs.numel() > 0:
             neg_likelihood[msg_pass_src_idxs, msg_pass_trg_idxs] = 0.0
         
         return neg_likelihood

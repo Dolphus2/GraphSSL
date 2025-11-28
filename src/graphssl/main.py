@@ -27,8 +27,8 @@ from graphssl.utils.downstream import (
 )
 from graphssl.utils.args_utils import parse_args, setup_logging_and_wandb
 
+logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
-logger.setLevel("DEBUG")
 
 def run_pipeline(args):
     """
@@ -98,9 +98,10 @@ def run_pipeline(args):
             args.downstream_n_runs = 1
             logger.info(f"Test mode: reducing downstream_n_runs to 1")
         # Reduce downstream epochs
-        if args.downstream_epochs > 3:
-            args.downstream_epochs = 3
-            logger.info(f"Test mode: reducing downstream_epochs to 3")
+        if args.downstream_node_epochs > 3 or args.downstream_link_epochs > 3:
+            if args.downstream_node_epochs > 3: args.downstream_node_epochs = 3
+            if args.downstream_link_epochs > 3: args.downstream_link_epochs = 3
+            logger.info(f"Test mode: reducing downstream_node_epochs and downstream_link_epochs to 3")
     
     # Step 2a: Create edge/node splits
     target_edge_type = tuple(args.target_edge_type.split(","))
@@ -283,7 +284,8 @@ def run_pipeline(args):
         early_stopping_patience=args.patience,
         checkpoint_dir=str(checkpoint_dir),
         verbose=True,
-        metric_for_best=args.metric_for_best
+        metric_for_best=args.metric_for_best,
+        disable_tqdm=args.disable_tqdm
     )
     
     # ==================== Step 7: Test Model ====================
@@ -295,7 +297,8 @@ def run_pipeline(args):
         model=model,
         test_loader=test_loader_for_testing,
         objective=objective,
-        device=device
+        device=device,
+        disable_tqdm=args.disable_tqdm
     )
     
     # ==================== Step 8: Save Results ====================
@@ -339,7 +342,8 @@ def run_pipeline(args):
             device=device,
             target_node_type=args.target_node,
             embeddings_path=embeddings_path,
-            logger=logger
+            logger=logger,
+            disable_tqdm=args.disable_tqdm
         )
     
     # ==================== Step 10: Downstream Evaluation (Optional) ====================

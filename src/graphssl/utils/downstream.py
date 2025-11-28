@@ -6,9 +6,9 @@ import logging
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import TensorDataset, DataLoader, Dataset
 from torch_geometric.loader import NeighborLoader, LinkNeighborLoader
-from graphssl.utils.data_utils import create_edge_splits, create_neighbor_loaders, create_link_loaders, extract_and_save_embeddings
+from graphssl.utils.data_utils import create_edge_splits, create_neighbor_loaders, create_link_loaders, extract_and_save_embeddings, validate_edge_index_for_data, validate_edge_index_for_embeddings, create_index_mapping, remap_edges
 from graphssl.utils.training_utils import extract_embeddings
 from graphssl.utils.objective_utils import DownstreamNodeClassification, DownstreamLinkMulticlass, SupervisedLinkPrediction, EdgeDecoder
 from graphssl.utils.downstream_models import MLPClassifier
@@ -20,8 +20,10 @@ import wandb
 
 
 logger = logging.getLogger(__name__)
+logger.setLevel("DEBUG")
 
-
+# I should really make things functional enough that I can use the train functions from training_utils,
+# but I can't be bothered right now. 
 def train_downstream_model(
     model: nn.Module,
     objective,
@@ -32,7 +34,8 @@ def train_downstream_model(
     num_epochs: int = 100,
     early_stopping_patience: int = 10,
     verbose: bool = False,
-    set_model_train: bool = True
+    set_model_train: bool = True,
+    disable_tqdm: bool = False
 ) -> Dict[str, List[float]]:
     """
     Unified training function for downstream tasks using objectives.
@@ -48,28 +51,30 @@ def train_downstream_model(
         early_stopping_patience: Patience for early stopping
         verbose: Whether to print progress
         set_model_train: Whether to call model.train() (False for frozen encoders)
+        disable_tqdm: Whether to disable tqdm progress bars
     
     Returns:
         Dictionary containing training history
     """
     best_val_metric = 0.0
     patience_counter = 0
-    history = {
-        'train_loss': [],
-        'val_loss': [],
-        'train_acc': [],
-        'val_acc': []
-    }
+    
+    # Initialize history with dynamic metric names from objective
+    metric_names = objective.get_metric_names()
+    history = {f"train_{name}": [] for name in metric_names}
+    history.update({f"val_{name}": [] for name in metric_names})
     
     for epoch in range(num_epochs):
         # Training
         if set_model_train:
             model.train()
-        train_loss = 0.0
-        train_correct = 0
-        train_total = 0
         
-        for batch in train_loader:
+        # Initialize metric accumulators
+        total_metrics = {name: 0.0 for name in metric_names}
+        total_metrics['correct'] = 0
+        total_metrics['total'] = 0
+        
+        for batch in tqdm(train_loader, desc="Training", leave=False, disable=disable_tqdm):
             if isinstance(batch, (list, tuple)):
                 batch = tuple(b.to(device) if isinstance(b, torch.Tensor) else b for b in batch)
             else:
@@ -85,34 +90,44 @@ def train_downstream_model(
             optimizer.step()
             
             # Accumulate metrics
-            train_loss += batch_metrics['loss'] * batch_metrics['total']
-            train_correct += batch_metrics['correct']
-            train_total += batch_metrics['total']
+            batch_size = batch_metrics.get('total', 1)
+            for key, value in batch_metrics.items():
+                if key == 'correct' or key == 'total':
+                    total_metrics[key] += value
+                elif key in total_metrics:
+                    total_metrics[key] += value * batch_size
         
-        print(f"End of epoch {epoch+1}: train_total={train_total}, type={type(train_total)}, train_correct={train_correct}, train_loss={train_loss}")
+        print(f"End of epoch {epoch+1}: train_total={total_metrics['total']}, train_correct={total_metrics['correct']}, train_loss={total_metrics.get('loss', 0.0)}")
         
-        if train_total == 0:
+        # Compute epoch averages
+        train_metrics = {}
+        if total_metrics['total'] == 0:
             logger.warning(f"Epoch {epoch+1}: train_total is 0 - no samples processed in training")
-            train_loss = 0.0
-            train_acc = 0.0
+            for key in metric_names:
+                train_metrics[key] = 0.0
         else:
-            train_loss /= train_total
-            train_acc = train_correct / train_total
+            for key in metric_names:
+                if key in total_metrics:
+                    train_metrics[key] = total_metrics[key] / total_metrics['total']
+            # Add accuracy if we tracked correct/total
+            if 'correct' in total_metrics and total_metrics['total'] > 0:
+                train_metrics['acc'] = total_metrics['correct'] / total_metrics['total']
         
         # Validation
-        val_loss, val_acc = evaluate_downstream_model(
-            model, objective, val_loader, device
+        val_metrics = evaluate_downstream_model(
+            model, objective, val_loader, device, disable_tqdm
         )
         
         # Store history
-        history['train_loss'].append(train_loss)
-        history['val_loss'].append(val_loss)
-        history['train_acc'].append(train_acc)
-        history['val_acc'].append(val_acc)
+        for key, value in train_metrics.items():
+            history[f"train_{key}"].append(value)
+        for key, value in val_metrics.items():
+            history[f"val_{key}"].append(value)
         
-        # Early stopping
-        if val_acc > best_val_metric:
-            best_val_metric = val_acc
+        # Early stopping (use 'acc' metric if available, otherwise use first metric)
+        val_metric_for_best = val_metrics.get('acc', val_metrics.get(metric_names[0], 0.0))
+        if val_metric_for_best > best_val_metric:
+            best_val_metric = val_metric_for_best
             patience_counter = 0
         else:
             patience_counter += 1
@@ -122,11 +137,9 @@ def train_downstream_model(
                 break
         
         if verbose and (epoch + 1) % 10 == 0:
-            logger.info(
-                f"Epoch {epoch+1}/{num_epochs} - "
-                f"Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, "
-                f"Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}"
-            )
+            train_str = " | ".join([f"Train {k.capitalize()}: {v:.4f}" for k, v in train_metrics.items()])
+            val_str = " | ".join([f"Val {k.capitalize()}: {v:.4f}" for k, v in val_metrics.items()])
+            logger.info(f"Epoch {epoch+1}/{num_epochs} - {train_str} | {val_str}")
     
     return history
 
@@ -136,8 +149,9 @@ def evaluate_downstream_model(
     model: nn.Module,
     objective,
     loader: DataLoader,
-    device: torch.device
-) -> Tuple[float, float]:
+    device: torch.device,
+    disable_tqdm: bool = False
+) -> Dict[str, float]:
     """
     Unified evaluation function for downstream tasks using objectives.
     
@@ -146,15 +160,18 @@ def evaluate_downstream_model(
         objective: TrainingObjective instance defining the task
         loader: Data loader
         device: Device to evaluate on
+        disable_tqdm: Whether to disable tqdm progress bars
     
     Returns:
-        Tuple of (loss, accuracy)
+        Dictionary of evaluation metrics
     """
     model.eval()
     
-    total_loss = 0.0
-    correct = 0
-    total = 0
+    # Initialize metric accumulators
+    metric_names = objective.get_metric_names()
+    total_metrics = {name: 0.0 for name in metric_names}
+    total_metrics['correct'] = 0
+    total_metrics['total'] = 0
     num_batches = 0
     num_empty_batches = 0
     
@@ -175,22 +192,34 @@ def evaluate_downstream_model(
             num_empty_batches += 1
         
         # Accumulate metrics
-        total_loss += batch_metrics['loss'] * batch_metrics['total']
-        correct += batch_metrics['correct']
-        total += batch_metrics['total']
+        batch_size = batch_metrics.get('total', 1)
+        for key, value in batch_metrics.items():
+            if key == 'correct' or key == 'total':
+                total_metrics[key] += value
+            elif key in total_metrics:
+                total_metrics[key] += value * batch_size
     
-    print(f"End of evaluation: train_total={total}, type={type(total)}, train_correct={correct}, train_loss={total_loss}")
-    if total == 0:
+    print(f"End of evaluation: total={total_metrics['total']}, type={type(total_metrics['total'])}, correct={total_metrics['correct']}, loss={total_metrics.get('loss', 0.0)}")
+    
+    # Compute averages
+    eval_metrics = {}
+    if total_metrics['total'] == 0:
         logger.warning(f"Evaluation: total is 0 - processed {num_batches} batches, {num_empty_batches} had no edges")
-        return 0.0, 0.0
+        for key in metric_names:
+            eval_metrics[key] = 0.0
+    else:
+        if num_empty_batches > 0:
+            logger.info(f"Evaluation: {num_empty_batches}/{num_batches} batches had no edges (papers with no field_of_study)")
+        
+        for key in metric_names:
+            if key in total_metrics:
+                eval_metrics[key] = total_metrics[key] / total_metrics['total']
+        
+        # Add accuracy if we tracked correct/total
+        if 'correct' in total_metrics and total_metrics['total'] > 0:
+            eval_metrics['acc'] = total_metrics['correct'] / total_metrics['total']
     
-    if num_empty_batches > 0:
-        logger.info(f"Evaluation: {num_empty_batches}/{num_batches} batches had no edges (papers with no field_of_study)")
-    
-    avg_loss = total_loss / total
-    accuracy = correct / total
-    
-    return avg_loss, accuracy
+    return eval_metrics
 
 
 def evaluate_node_property_prediction(
@@ -211,7 +240,8 @@ def evaluate_node_property_prediction(
     weight_decay: float = 0.0,
     num_epochs: int = 100,
     early_stopping_patience: int = 10,
-    verbose: bool = True
+    verbose: bool = True,
+    disable_tqdm: bool = False
 ) -> Dict[str, Any]:
     """
     Evaluate node property prediction by training multiple classifier heads.
@@ -300,14 +330,17 @@ def evaluate_node_property_prediction(
             device=device,
             num_epochs=num_epochs,
             early_stopping_patience=early_stopping_patience,
-            verbose=verbose
+            verbose=verbose,
+            disable_tqdm=disable_tqdm
         )
         
         # Evaluate on test set
-        test_loss, test_acc = evaluate_downstream_model(
-            classifier, objective, test_loader, device
+        test_metrics = evaluate_downstream_model(
+            classifier, objective, test_loader, device, disable_tqdm
         )
         
+        test_acc = test_metrics.get('acc', 0.0)
+        test_loss = test_metrics.get('loss', 0.0)
         test_accuracies.append(test_acc)
         test_losses.append(test_loss)
         
@@ -357,7 +390,8 @@ def train_downstream_link_predictor(
     device: torch.device,
     num_epochs: int = 100,
     early_stopping_patience: int = 10,
-    verbose: bool = False
+    verbose: bool = False,
+    disable_tqdm: bool = False
 ) -> Dict[str, List[float]]:
     """
     Train a link prediction decoder with frozen encoder.
@@ -400,7 +434,8 @@ def train_downstream_link_predictor(
         num_epochs=num_epochs,
         early_stopping_patience=early_stopping_patience,
         verbose=verbose,
-        set_model_train=False  # Keep encoder in eval mode
+        set_model_train=False,  # Keep encoder in eval mode
+        disable_tqdm=disable_tqdm
     )
 
 
@@ -425,7 +460,8 @@ def evaluate_link_prediction(
     neg_sampling_ratio: float = 1.0,
     early_stopping_patience: int = 10,
     num_workers: int = 4,
-    verbose: bool = True
+    verbose: bool = True,
+    disable_tqdm: bool = False
 ) -> Dict[str, Any]:
     """
     Evaluate link prediction by training decoder heads with frozen encoder.
@@ -522,14 +558,17 @@ def evaluate_link_prediction(
             device=device,
             num_epochs=num_epochs,
             early_stopping_patience=early_stopping_patience,
-            verbose=verbose
+            verbose=verbose,
+            disable_tqdm=disable_tqdm
         )
         
         # Evaluate on test set
-        test_loss, test_acc = evaluate_downstream_model(
-            model, objective, test_loader, device
+        test_metrics = evaluate_downstream_model(
+            model, objective, test_loader, device, disable_tqdm
         )
         
+        test_acc = test_metrics.get('acc', 0.0)
+        test_loss = test_metrics.get('loss', 0.0)
         test_accuracies.append(test_acc)
         test_losses.append(test_loss)
         
@@ -576,10 +615,13 @@ def evaluate_link_prediction_multiclass(
     test_data,
     train_embeddings: torch.Tensor,
     train_edge_index: torch.Tensor,
+    train_msg_passing_edges: torch.Tensor,
     val_embeddings: torch.Tensor,
     val_edge_index: torch.Tensor,
+    val_msg_passing_edges: torch.Tensor,
     test_embeddings: torch.Tensor,
     test_edge_index: torch.Tensor,
+    test_msg_passing_edges: torch.Tensor,
     target_edge_type: Tuple[str, str, str],
     device: torch.device,
     n_runs: int = 10,
@@ -593,13 +635,17 @@ def evaluate_link_prediction_multiclass(
     num_epochs: int = 100,
     early_stopping_patience: int = 10,
     num_workers: int = 4,
-    verbose: bool = True
+    verbose: bool = True,
+    disable_tqdm: bool = False
 ) -> Dict[str, Any]:
     """
-    Evaluate link prediction as multiclass classification.
+    Evaluate link prediction as multi-label classification using one-hot encoded labels.
     Projects source node embeddings to target embedding space.
-    Predicts which target nodes (e.g., field_of_study) each source node (e.g., paper) links to.
-    Only uses edges from train/val/test_edge_index, not edges from the graph used for message passing.
+    
+    Labels are encoded as:
+      - 1 if there's a supervision edge (from train/val/test_edge_index)
+      - -1 if there's a message passing edge (masked out in loss)
+      - 0 otherwise (negative example)
     
     Args:
         model: The trained encoder model (frozen)
@@ -607,15 +653,18 @@ def evaluate_link_prediction_multiclass(
         val_data: Validation data split (HeteroData, contains edges used for message passing)
         test_data: Test data split (HeteroData, contains edges used for message passing)
         train_embeddings: Precomputed training embeddings for source nodes [N_train, hidden_dim]
-        train_edge_index: Training edges to predict [2, num_train_edges] where [0] are source indices, [1] are target indices
+        train_edge_index: Training edges to predict [2, num_train_edges] where [0] are source, [1] are target
+        train_msg_passing_edges: Training message passing edges (remapped) [2, num_edges]
         val_embeddings: Precomputed validation embeddings for source nodes [N_val, hidden_dim]
         val_edge_index: Validation edges to predict [2, num_val_edges]
+        val_msg_passing_edges: Validation message passing edges (remapped) [2, num_edges]
         test_embeddings: Precomputed test embeddings for source nodes [N_test, hidden_dim]
         test_edge_index: Test edges to predict [2, num_test_edges]
+        test_msg_passing_edges: Test message passing edges (remapped) [2, num_edges]
         target_edge_type: Edge type tuple (src_type, relation, dst_type)
         device: Device to train on
         n_runs: Number of independent runs for uncertainty estimation
-        num_neighbors: Number of neighbors to sample at each layer
+        num_neighbors: Number of neighbors to sample at each layer (not used, kept for compatibility)
         hidden_dim: Hidden dimension for decoder MLP
         num_layers: Number of MLP layers
         dropout: Dropout rate for decoder
@@ -624,15 +673,16 @@ def evaluate_link_prediction_multiclass(
         weight_decay: Weight decay for decoder
         num_epochs: Maximum number of epochs per run
         early_stopping_patience: Patience for early stopping
-        num_workers: Number of worker processes for data loading
+        num_workers: Number of worker processes for data loading (not used)
         verbose: Whether to print progress
+        disable_tqdm: Whether to disable tqdm progress bars
     
     Returns:
         Dictionary with mean and std of metrics across runs
     """
     
     logger.info("="*80)
-    logger.info("Downstream Task: Link Prediction as Multiclass Classification")
+    logger.info("Downstream Task: Link Prediction as Multi-Label Classification")
     logger.info("="*80)
     logger.info(f"Target edge type: {target_edge_type}")
     logger.info(f"Running {n_runs} independent trials...")
@@ -641,14 +691,8 @@ def evaluate_link_prediction_multiclass(
     source_node_type = target_edge_type[0]
     target_node_type = target_edge_type[2]
     
-    # Get edges that were used for message passing during model training
-    # These edges should NOT be used as positive or negative examples
-    train_msg_passing_edges = train_data[target_edge_type].edge_index
-    val_msg_passing_edges = val_data[target_edge_type].edge_index
-    test_msg_passing_edges = test_data[target_edge_type].edge_index
-    
-    logger.info(f"Message passing edges - Train: {train_msg_passing_edges.size(1)}, Val: {val_msg_passing_edges.size(1)}, Test: {test_msg_passing_edges.size(1)}")
-    logger.info(f"Supervision edges - Train: {train_edge_index.size(1)}, Val: {val_edge_index.size(1)}, Test: {test_edge_index.size(1)}")
+    logger.info(f"Message passing edges (remapped) - Train: {train_msg_passing_edges.size(1)}, Val: {val_msg_passing_edges.size(1)}, Test: {test_msg_passing_edges.size(1)}")
+    logger.info(f"Supervision edges (remapped) - Train: {train_edge_index.size(1)}, Val: {val_edge_index.size(1)}, Test: {test_edge_index.size(1)}")
     
     # Extract embeddings for all target nodes (e.g., all field_of_study nodes)
     logger.info(f"Extracting embeddings for all {target_node_type} nodes...")
@@ -677,140 +721,101 @@ def evaluate_link_prediction_multiclass(
             )
     
     target_embeddings = torch.cat(target_embeddings_list, dim=0)
+    num_targets = target_embeddings.shape[0]
     logger.info(f"Target embeddings shape: {target_embeddings.shape}")
+    logger.info(f"Number of target classes: {num_targets}")
     
-    # Use precomputed source embeddings
-    logger.info(f"Using precomputed source node embeddings...")
-    logger.info(f"Train samples: {train_embeddings.shape[0]}")
-    logger.info(f"Val samples: {val_embeddings.shape[0]}")
-    logger.info(f"Test samples: {test_embeddings.shape[0]}")
-    logger.info(f"Embedding dim: {train_embeddings.shape[1]}")
-    logger.info(f"Number of target classes: {target_embeddings.shape[0]}")
+    logger.info(f"Train supervision edges: {train_edge_index.size(1)}")
+    logger.info(f"Train message passing edges: {train_msg_passing_edges.size(1)}")
+    logger.info(f"Total possible edges: {train_embeddings.shape[0] * num_targets}")
     
-    # Create custom dataset that returns edge indices per batch
-    logger.info("Creating edge-based datasets...")
-    
-    class EdgeIndexDataset(torch.utils.data.Dataset):
-        """
-        Dataset that returns embeddings and edge indices for multi-label classification.
-        Each batch contains all embeddings and the edges for those specific source nodes.
-        """
-        def __init__(self, embeddings, edge_index):
+    class SparseEdgeDataset(Dataset):
+        def __init__(self, embeddings, edge_index, msg_pass_edge_index):
             """
+            Dataset that returns embeddings with their corresponding edge lists.
+            
             Args:
                 embeddings: Node embeddings [num_nodes, hidden_dim]
-                edge_index: Edge indices [2, num_edges] where [0] are source, [1] are target
+                edge_index: Supervision edges [2, num_edges]
+                msg_pass_edge_index: Message passing edges [2, num_edges]
             """
             self.embeddings = embeddings
-            self.edge_index = edge_index
-            self.num_nodes = embeddings.size(0)
             
+            # Create lookup dictionaries with tensors
+            def create_target_dict(edge_index):
+                dict = {}
+                if edge_index.size(1) > 0:
+                    unique_sources = torch.unique(edge_index[0])
+                    for src in unique_sources.tolist():
+                        targets = edge_index[1, edge_index[0] == src]
+                        dict[src] = targets
+                return dict
+
+            self.pos_dict = create_target_dict(edge_index)
+            self.msg_pass_dict = create_target_dict(msg_pass_edge_index)
+    
         def __len__(self):
-            return self.num_nodes
+            return len(self.embeddings)
         
         def __getitem__(self, idx):
-            # Return embedding and node index
-            return self.embeddings[idx], idx
+            embedding = self.embeddings[idx]
+            pos_targets = self.pos_dict.get(idx, torch.tensor([], dtype=torch.long))
+            msg_pass_targets = self.msg_pass_dict.get(idx, torch.tensor([], dtype=torch.long))
+            return embedding, pos_targets, msg_pass_targets
+
+    class SparseEdgeDataset2(Dataset):
+        def __init__(self, embeddings, edge_index, msg_pass_edge_index):
+            self.embeddings = embeddings
+
+            def build_groups(edge_index):
+                # Sort by source
+                src = edge_index[0]
+                dst = edge_index[1]
+                order = torch.argsort(src)
+                src = src[order]
+                dst = dst[order]
+
+                # Build index pointers of length (num_nodes + 1)
+                num_nodes = embeddings.size(0)
+                counts = torch.bincount(src, minlength=num_nodes)
+                ptr = torch.zeros(num_nodes + 1, dtype=torch.long)
+                ptr[1:] = torch.cumsum(counts, dim=0)
+
+                return dst, ptr  # flat_targets, index_pointer
+
+            self.pos_targets, self.pos_ptr = build_groups(edge_index)
+            self.msg_targets, self.msg_ptr = build_groups(msg_pass_edge_index)
+
+        def __len__(self):
+            return len(self.embeddings)
+
+        def __getitem__(self, idx):
+            emb = self.embeddings[idx]
+
+            # Retrieve slices through the pointer array
+            p0, p1 = self.pos_ptr[idx], self.pos_ptr[idx + 1]
+            pos = self.pos_targets[p0:p1]
+
+            m0, m1 = self.msg_ptr[idx], self.msg_ptr[idx + 1]
+            msg = self.msg_targets[m0:m1]
+
+            return emb, pos, msg
+
+    train_dataset = SparseEdgeDataset2(train_embeddings, train_edge_index, train_msg_passing_edges)
+    val_dataset = SparseEdgeDataset2(val_embeddings, val_edge_index, val_msg_passing_edges)
+    test_dataset = SparseEdgeDataset2(test_embeddings, test_edge_index, test_msg_passing_edges)
     
-    def build_edge_dict(edge_index):
-        """Build mapping from source node to list of target nodes."""
-        edge_dict = {}
-        for i in range(edge_index.size(1)):
-            src = int(edge_index[0, i].item())
-            tgt = int(edge_index[1, i].item())
-            if src not in edge_dict:
-                edge_dict[src] = []
-            edge_dict[src].append(tgt)
-        return edge_dict
+    # Custom collate function to handle sparse edge tensors
+    def collate_sparse_edges(batch):
+        embeddings = torch.stack([item[0] for item in batch])
+        pos_targets = [item[1] for item in batch]  # List of tensors
+        msg_pass_targets = [item[2] for item in batch]  # List of tensors
+        return embeddings, pos_targets, msg_pass_targets
     
-    # Build supervision edge dicts (disjoint from message passing edges)
-    train_edge_dict = build_edge_dict(train_edge_index)
-    val_edge_dict = build_edge_dict(val_edge_index)
-    test_edge_dict = build_edge_dict(test_edge_index)
-    
-    # Build message passing edge dicts
-    train_msg_pass_edge_dict = build_edge_dict(train_msg_passing_edges)
-    val_msg_pass_edge_dict = build_edge_dict(val_msg_passing_edges)
-    test_msg_pass_edge_dict = build_edge_dict(test_msg_passing_edges)
-    
-    logger.info(f"Train nodes - supervision edges: {len(train_edge_dict)}, msg passing edges: {len(train_msg_pass_edge_dict)}")
-    logger.info(f"Val nodes - supervision edges: {len(val_edge_dict)}, msg passing edges: {len(val_msg_pass_edge_dict)}")
-    logger.info(f"Test nodes - supervision edges: {len(test_edge_dict)}, msg passing edges: {len(test_msg_pass_edge_dict)}")
-    
-    def collate_with_edges(batch, edge_dict, msg_pass_edge_dict):
-        """
-        Custom collate that includes supervision and message passing edge indices for the batch.
-        """
-        embeddings_list, indices_list = zip(*batch)
-        embeddings = torch.stack(embeddings_list, dim=0)
-        indices = torch.tensor(indices_list, dtype=torch.long)
-        
-        # Build supervision edge index for this batch
-        batch_edge_sources = []
-        batch_edge_targets = []
-        
-        for local_idx, global_idx in enumerate(indices):
-            global_idx = int(global_idx.item())
-            if global_idx in edge_dict:
-                for target_idx in edge_dict[global_idx]:
-                    batch_edge_sources.append(local_idx)
-                    batch_edge_targets.append(target_idx)
-        
-        if len(batch_edge_sources) > 0:
-            batch_edge_index = torch.tensor(
-                [batch_edge_sources, batch_edge_targets],
-                dtype=torch.long
-            )
-        else:
-            # Empty edge index
-            batch_edge_index = torch.zeros((2, 0), dtype=torch.long)
-        
-        # Build message passing edge index for this batch
-        msg_pass_batch_edge_sources = []
-        msg_pass_batch_edge_targets = []
-        
-        for local_idx, global_idx in enumerate(indices):
-            global_idx = int(global_idx.item())
-            if global_idx in msg_pass_edge_dict:
-                for target_idx in msg_pass_edge_dict[global_idx]:
-                    msg_pass_batch_edge_sources.append(local_idx)
-                    msg_pass_batch_edge_targets.append(target_idx)
-        
-        if len(msg_pass_batch_edge_sources) > 0:
-            msg_pass_batch_edge_index = torch.tensor(
-                [msg_pass_batch_edge_sources, msg_pass_batch_edge_targets],
-                dtype=torch.long
-            )
-        else:
-            # Empty edge index
-            msg_pass_batch_edge_index = torch.zeros((2, 0), dtype=torch.long)
-        
-        return embeddings, batch_edge_index, msg_pass_batch_edge_index, len(indices)
-    
-    # Create datasets
-    train_dataset = EdgeIndexDataset(train_embeddings, train_edge_index)
-    val_dataset = EdgeIndexDataset(val_embeddings, val_edge_index)
-    test_dataset = EdgeIndexDataset(test_embeddings, test_edge_index)
-    
-    # Create data loaders with custom collate functions
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=batch_size,
-        shuffle=True,
-        collate_fn=lambda batch: collate_with_edges(batch, train_edge_dict, train_msg_pass_edge_dict)
-    )
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=lambda batch: collate_with_edges(batch, val_edge_dict, val_msg_pass_edge_dict)
-    )
-    test_loader = DataLoader(
-        test_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        collate_fn=lambda batch: collate_with_edges(batch, test_edge_dict, test_msg_pass_edge_dict)
-    )
+    # Create data loaders
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, collate_fn=collate_sparse_edges)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_sparse_edges)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, collate_fn=collate_sparse_edges)
     
     # Store results from all runs
     test_accuracies = []
@@ -854,14 +859,18 @@ def evaluate_link_prediction_multiclass(
             device=device,
             num_epochs=num_epochs,
             early_stopping_patience=early_stopping_patience,
-            verbose=verbose
+            verbose=verbose,
+            disable_tqdm=disable_tqdm
         )
         
         # Evaluate on test set
-        test_loss, test_f1 = evaluate_downstream_model(
-            decoder, objective, test_loader, device
+        test_metrics = evaluate_downstream_model(
+            decoder, objective, test_loader, device, disable_tqdm
         )
         
+        # Use F1 metric for multiclass link prediction (acc is actually F1 in this case)
+        test_f1 = test_metrics.get('acc', 0.0)
+        test_loss = test_metrics.get('loss', 0.0)
         test_accuracies.append(test_f1)
         test_losses.append(test_loss)
         
@@ -946,8 +955,9 @@ def run_downstream_evaluation(
         test_labels = embeddings_data['test_labels']
         global_embeddings = embeddings_data['global_embeddings']
     else:
-        # Create loaders and extract embeddings
-        logger.info("Creating loaders for embedding extraction...")
+        # Extract embeddings from datasets (no need to create loaders separately)
+        logger.info("Extracting embeddings from datasets...")
+
         train_loader, val_loader, test_loader, global_loader = create_neighbor_loaders(
             train_data=train_data,
             val_data=val_data,
@@ -957,8 +967,7 @@ def run_downstream_evaluation(
             batch_size=args.batch_size,
             num_workers=args.num_workers,
             target_node_type=args.target_node
-        )
-        
+    )
         embeddings_data = extract_and_save_embeddings(
             model=model,
             train_loader=train_loader,
@@ -968,7 +977,8 @@ def run_downstream_evaluation(
             device=device,
             target_node_type=args.target_node,
             embeddings_path=embeddings_path,
-            logger=logger
+            logger=logger,
+            disable_tqdm=args.disable_tqdm
         )
         
         train_embeddings = embeddings_data['train_embeddings']
@@ -979,12 +989,93 @@ def run_downstream_evaluation(
         test_labels = embeddings_data['test_labels']
         global_embeddings = embeddings_data['global_embeddings']
 
+    # Debug: Print embedding shapes
+    logger.debug(f"Train embeddings shape: {train_embeddings.shape}, Train labels shape: {train_labels.shape}")
+    logger.debug(f"Val embeddings shape: {val_embeddings.shape}, Val labels shape: {val_labels.shape}")
+    logger.debug(f"Test embeddings shape: {test_embeddings.shape}, Test labels shape: {test_labels.shape}")
+    logger.debug(f"Global embeddings shape: {global_embeddings.shape}")
+    
+    train_edge_index, val_edge_index, test_edge_index = edge_splits
+
+    # Use edge splits from Step 2
+    target_edge_type = tuple(args.target_edge_type.split(","))
+    logger.info(f"Using edge splits from Step 2 for edge type: {target_edge_type}")
+
+    # Validate edge indices match the datasets
+    validate_edge_index_for_data(train_edge_index, train_data, target_edge_type, "train")
+    validate_edge_index_for_data(val_edge_index, val_data, target_edge_type, "val")
+    validate_edge_index_for_data(test_edge_index, test_data, target_edge_type, "test")
+    
+    target_node_type = target_edge_type[2]
+    source_node_type = target_edge_type[0]
+    num_target_embeddings = full_data[target_node_type].num_nodes
+
+    logger.info("Remapping edge indices to match masked embeddings...")
+    
+    # Create mappings for source nodes
+    train_mask = train_data[source_node_type].train_mask
+    val_mask = val_data[source_node_type].val_mask
+    test_mask = test_data[source_node_type].test_mask
+    
+    train_mapping = create_index_mapping(train_mask)
+    val_mapping = create_index_mapping(val_mask)
+    test_mapping = create_index_mapping(test_mask)
+    
+    # Remap edge indices
+    train_edge_index_remapped = remap_edges(train_edge_index, train_mapping)
+    val_edge_index_remapped = remap_edges(val_edge_index, val_mapping)
+    test_edge_index_remapped = remap_edges(test_edge_index, test_mapping)
+    
+    logger.info(f"Edge remapping complete:")
+    logger.info(f"  Train: {train_edge_index.size(1)} -> {train_edge_index_remapped.size(1)} edges")
+    logger.info(f"  Val: {val_edge_index.size(1)} -> {val_edge_index_remapped.size(1)} edges")
+    logger.info(f"  Test: {test_edge_index.size(1)} -> {test_edge_index_remapped.size(1)} edges")
+
+    # Also need to remap message passing edges
+    train_msg_passing_edges = train_data[target_edge_type].edge_index
+    val_msg_passing_edges = val_data[target_edge_type].edge_index
+    test_msg_passing_edges = test_data[target_edge_type].edge_index
+    
+    train_msg_passing_edges_remapped = remap_edges(train_msg_passing_edges, train_mapping)
+    val_msg_passing_edges_remapped = remap_edges(val_msg_passing_edges, val_mapping)
+    test_msg_passing_edges_remapped = remap_edges(test_msg_passing_edges, test_mapping)
+    
+    logger.info(f"Message passing edge remapping:")
+    logger.info(f"  Train: {train_msg_passing_edges.size(1)} -> {train_msg_passing_edges_remapped.size(1)} edges")
+    logger.info(f"  Val: {val_msg_passing_edges.size(1)} -> {val_msg_passing_edges_remapped.size(1)} edges")
+    logger.info(f"  Test: {test_msg_passing_edges.size(1)} -> {test_msg_passing_edges_remapped.size(1)} edges")
+    
+    logger.info("Validating remapped edge splits compatibility with masked embeddings...")
+    validate_edge_index_for_embeddings(
+        train_edge_index_remapped, 
+        train_mask.sum().item(), 
+        num_target_embeddings,
+        target_edge_type, 
+        "train"
+    )
+    validate_edge_index_for_embeddings(
+        val_edge_index_remapped, 
+        val_mask.sum().item(), 
+        num_target_embeddings,
+        target_edge_type, 
+        "val"
+    )
+    validate_edge_index_for_embeddings(
+        test_edge_index_remapped, 
+        test_mask.sum().item(), 
+        num_target_embeddings,
+        target_edge_type, 
+        "test"
+    )
+    logger.info("Edge splits validation passed!")
+
     # Ensure labels are available
     if train_labels is None or val_labels is None or test_labels is None:
         raise ValueError("Labels are required for downstream evaluation but were not found in embeddings")
 
     # Step 10a: Node property prediction
     if args.downstream_task in ["node", "both"]:
+        
         node_results = evaluate_node_property_prediction(
             train_embeddings=train_embeddings,
             train_labels=train_labels,
@@ -1001,9 +1092,10 @@ def run_downstream_evaluation(
             batch_size=args.downstream_batch_size,
             lr=args.downstream_lr,
             weight_decay=args.downstream_weight_decay,
-            num_epochs=args.downstream_epochs,
+            num_epochs=args.downstream_node_epochs,
             early_stopping_patience=args.downstream_patience,
             verbose=True,
+            disable_tqdm=args.disable_tqdm
         )
 
         # Save node prediction results
@@ -1013,10 +1105,6 @@ def run_downstream_evaluation(
 
     # Step 10b: Link prediction
     if args.downstream_task in ["link", "both"]:
-        # Use edge splits from Step 2
-        target_edge_type = tuple(args.target_edge_type.split(","))
-        logger.info(f"Using edge splits from Step 2 for edge type: {target_edge_type}")
-        train_edge_index, val_edge_index, test_edge_index = edge_splits
         
         # Apply test mode optimization if needed
         if args.test_mode:
@@ -1039,11 +1127,12 @@ def run_downstream_evaluation(
             batch_size=args.downstream_batch_size,
             lr=args.downstream_lr,
             weight_decay=args.downstream_weight_decay,
-            num_epochs=args.downstream_epochs,
+            num_epochs=args.downstream_link_epochs,
             neg_sampling_ratio=args.neg_sampling_ratio,
             early_stopping_patience=args.downstream_patience,
             num_workers=args.num_workers,
-            verbose=True
+            verbose=True,
+            disable_tqdm=args.disable_tqdm
         )
 
         # Save link prediction results
@@ -1052,26 +1141,30 @@ def run_downstream_evaluation(
         logger.info(f"Link prediction results saved to: {link_results_path}")
     
     # Step 10c: Link prediction as multiclass (only for paper -> field_of_study)
-    target_edge_type_tuple = tuple(args.target_edge_type.split(","))
+
+    target_edge_type = tuple(args.target_edge_type.split(","))
     if (args.downstream_task in ["link", "both", "multiclass_link"] and 
-        target_edge_type_tuple == ("paper", "has_topic", "field_of_study")):
-        train_edge_index, val_edge_index, test_edge_index = edge_splits
+        target_edge_type == ("paper", "has_topic", "field_of_study")):
         
         logger.info("="*80)
         logger.info("Running link prediction as multiclass classification...")
         logger.info("="*80)
+    
         multiclass_results = evaluate_link_prediction_multiclass(
             model=model,
             train_data=train_data,
             val_data=val_data,
             test_data=test_data,
             train_embeddings=train_embeddings,
-            train_edge_index=train_edge_index,
+            train_edge_index=train_edge_index_remapped,
+            train_msg_passing_edges=val_msg_passing_edges_remapped,
             val_embeddings=val_embeddings,
-            val_edge_index=val_edge_index,
+            val_edge_index=val_edge_index_remapped,
+            val_msg_passing_edges=val_msg_passing_edges_remapped,
             test_embeddings=test_embeddings,
-            test_edge_index=test_edge_index,
-            target_edge_type=target_edge_type_tuple,
+            test_edge_index=test_edge_index_remapped,
+            test_msg_passing_edges=test_msg_passing_edges_remapped,
+            target_edge_type=target_edge_type,
             device=device,
             n_runs=args.downstream_n_runs,
             num_neighbors=args.num_neighbors,
@@ -1081,10 +1174,11 @@ def run_downstream_evaluation(
             batch_size=args.downstream_batch_size,
             lr=args.downstream_lr,
             weight_decay=args.downstream_weight_decay,
-            num_epochs=args.downstream_epochs,
+            num_epochs=args.downstream_node_epochs,
             early_stopping_patience=args.downstream_patience,
             num_workers=args.num_workers,
-            verbose=True
+            verbose=True,
+            disable_tqdm=args.disable_tqdm
         )
         
         # Save multiclass link prediction results

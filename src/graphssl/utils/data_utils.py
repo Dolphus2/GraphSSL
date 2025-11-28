@@ -49,6 +49,150 @@ def load_ogb_mag(root_path: str, preprocess: str = "metapath2vec") -> HeteroData
     return data
 
 
+def validate_edge_index_for_data(
+    edge_index: torch.Tensor,
+    data: HeteroData,
+    edge_type: Tuple[str, str, str],
+    split_name: str = ""
+) -> None:
+    """
+    Validate that edge indices are within valid bounds for the given dataset.
+    
+    Args:
+        edge_index: Edge index tensor [2, num_edges] containing source and target node indices
+        data: HeteroData object containing the graph
+        edge_type: Edge type tuple (src_type, relation, dst_type)
+        split_name: Optional name of the split for error messages (e.g., "train", "val", "test")
+    
+    Raises:
+        AssertionError: If any edge index is out of bounds
+    """
+    src_type, relation, dst_type = edge_type
+    split_str = f"{split_name} " if split_name else ""
+    
+    if edge_index.size(1) == 0:
+        logger.warning(f"Empty edge index for {split_str}{edge_type}")
+        return
+    
+    num_src_nodes = data[src_type].num_nodes
+    num_dst_nodes = data[dst_type].num_nodes
+    
+    # Get max indices in edge_index
+    max_src_idx = edge_index[0].max().item()
+    max_dst_idx = edge_index[1].max().item()
+    
+    # Validate source indices
+    assert max_src_idx < num_src_nodes, (
+        f"Invalid {split_str}edge index for {edge_type}: "
+        f"max source index {max_src_idx} >= num {src_type} nodes {num_src_nodes}"
+    )
+    
+    # Validate destination indices
+    assert max_dst_idx < num_dst_nodes, (
+        f"Invalid {split_str}edge index for {edge_type}: "
+        f"max destination index {max_dst_idx} >= num {dst_type} nodes {num_dst_nodes}"
+    )
+    
+    logger.debug(
+        f"Validated {split_str}edge index for {edge_type}: "
+        f"max_src={max_src_idx} < {num_src_nodes}, max_dst={max_dst_idx} < {num_dst_nodes}"
+    )
+
+
+def validate_edge_index_for_embeddings(
+    edge_index: torch.Tensor,
+    num_src_embeddings: int,
+    num_dst_embeddings: int,
+    edge_type: Tuple[str, str, str],
+    split_name: str = ""
+) -> None:
+    """
+    Validate that edge indices are within valid bounds for the given embeddings.
+    
+    Args:
+        edge_index: Edge index tensor [2, num_edges] containing source and target node indices
+        num_src_embeddings: Number of source node embeddings available
+        num_dst_embeddings: Number of destination node embeddings available
+        edge_type: Edge type tuple (src_type, relation, dst_type) for error messages
+        split_name: Optional name of the split for error messages (e.g., "train", "val", "test")
+    
+    Raises:
+        AssertionError: If any edge index is out of bounds
+    """
+    src_type, relation, dst_type = edge_type
+    split_str = f"{split_name} " if split_name else ""
+    
+    if edge_index.size(1) == 0:
+        logger.warning(f"Empty edge index for {split_str}{edge_type}")
+        return
+    
+    # Get max indices in edge_index
+    max_src_idx = edge_index[0].max().item()
+    max_dst_idx = edge_index[1].max().item()
+    
+    # Validate source indices
+    assert max_src_idx < num_src_embeddings, (
+        f"Invalid {split_str}edge index for {edge_type}: "
+        f"max source index {max_src_idx} >= num source embeddings {num_src_embeddings}"
+    )
+    
+    # Validate destination indices (if different from source)
+    if num_dst_embeddings != num_src_embeddings or src_type != dst_type:
+        assert max_dst_idx < num_dst_embeddings, (
+            f"Invalid {split_str}edge index for {edge_type}: "
+            f"max destination index {max_dst_idx} >= num destination embeddings {num_dst_embeddings}"
+        )
+    
+    logger.debug(
+        f"Validated {split_str}edge index for {edge_type}: "
+        f"max_src={max_src_idx} < {num_src_embeddings}, max_dst={max_dst_idx} < {num_dst_embeddings}"
+    )
+
+
+def create_index_mapping(mask: torch.Tensor) -> torch.Tensor:
+    """
+    Create a mapping from original indices to masked indices.
+    
+    Args:
+        mask: Boolean mask tensor indicating which nodes to include
+    
+    Returns:
+        Mapping tensor where mapping[i] gives the new index for node i if mask[i] is True,
+        otherwise -1 to indicate the node is not in the masked set
+    """
+    mapping = torch.full((len(mask),), -1, dtype=torch.long)
+    mapping[mask] = torch.arange(mask.sum().item(), dtype=torch.long)
+    return mapping
+
+
+def remap_edges(edge_index: torch.Tensor, mapping: torch.Tensor) -> torch.Tensor:
+    """
+    Remap edge indices according to a node index mapping.
+    
+    Filters out edges where the source node is not in the mapping (mapping[src] == -1),
+    and remaps the remaining source indices to their new positions.
+    
+    Args:
+        edge_index: Edge index tensor [2, num_edges] where row 0 contains source indices
+        mapping: Index mapping tensor where mapping[i] = new_index or -1 if not in mask
+    
+    Returns:
+        Remapped edge index tensor [2, num_filtered_edges] with source indices remapped
+    """
+    if edge_index.size(1) == 0:
+        return edge_index
+    
+    # Filter edges where source is in the mask
+    valid_mask = mapping[edge_index[0]] != -1
+    filtered_edges = edge_index[:, valid_mask]
+    
+    # Remap source indices
+    remapped_edges = filtered_edges.clone()
+    remapped_edges[0] = mapping[filtered_edges[0]]
+    
+    return remapped_edges
+
+
 def create_neighbor_loaders(
     train_data: HeteroData,
     val_data: HeteroData,
@@ -280,6 +424,7 @@ def create_edge_splits(
     
     Returns:
         Tuple of (train_data, val_data, test_data, train_edge_index, val_edge_index, test_edge_index)
+        where edge indices are in LOCAL coordinates if dependent=True
     """
     torch.manual_seed(seed)
     
@@ -357,6 +502,13 @@ def create_edge_splits(
                 f"train={train_edge_index.size(1)}, "
                 f"val={val_edge_index.size(1)}, "
                 f"test={test_edge_index.size(1)}")
+    
+    # Validate edge splits are within bounds
+    logger.debug("Validating edge splits...")
+    validate_edge_index_for_data(train_edge_index, train_data, target_edge_type, "train")
+    validate_edge_index_for_data(val_edge_index, val_data, target_edge_type, "val")
+    validate_edge_index_for_data(test_edge_index, test_data, target_edge_type, "test")
+    logger.debug("Edge splits validation passed!")
     
     return train_data, val_data, test_data, train_edge_index, val_edge_index, test_edge_index
 
@@ -560,7 +712,7 @@ def split_edges(
     the graph for message passing, storing them separately.
     
     Args:
-        data: HeteroData object
+        data: HeteroData object (with nodes already remapped if inductive transformation was applied)
         target_edge_type: Edge type tuple (src_type, relation, dst_type)
         split: Which split to target ('train', 'val', or 'test')
         edge_msg_pass_prop: Proportion of edges to keep for message passing (0.0 to 1.0)
@@ -569,7 +721,7 @@ def split_edges(
     Returns:
         Tuple of (data, split_edge_index) where:
         - data: Modified HeteroData with edges removed
-        - split_edge_index: Edges removed from data
+        - split_edge_index: Edges removed from data (in local coordinates)
     """
     torch.manual_seed(seed)
     
@@ -618,7 +770,10 @@ def split_edges(
     data[target_edge_type].edge_index = edge_index[:, keep_mask]
     
     logger.debug(f"Split edges for {target_edge_type} (split={split}, seed={seed}, edge_msg_pass_prop={edge_msg_pass_prop}): "
-                f"incident={num_incident}, msg_pass={num_msg_pass}, removed={num_split}")
+                f"incident={num_incident}, msg_pass={num_msg_pass}, removed={num_split}, "
+                f"max_src_idx={split_edge_index[0].max().item() if split_edge_index.size(1) > 0 else -1}, "
+                f"max_dst_idx={split_edge_index[1].max().item() if split_edge_index.size(1) > 0 else -1}, "
+                f"num_src_nodes={data[src_type].num_nodes}, num_dst_nodes={data[dst_type].num_nodes}")
     
     return data, split_edge_index
 
@@ -632,42 +787,49 @@ def extract_and_save_embeddings(
     device: torch.device,
     target_node_type: str,
     embeddings_path: Path,
-    logger: logging.Logger
+    logger: logging.Logger,
+    disable_tqdm: bool = False
 ) -> Dict:
     """
-    Extract embeddings from model using loaders and save to disk.
+    Extract embeddings from model using provided loaders and save to disk.
     
     Args:
         model: Trained model for embedding extraction
-        train_loader: Training NeighborLoader
-        val_loader: Validation NeighborLoader  
-        test_loader: Test NeighborLoader
-        global_loader: Global NeighborLoader
+        train_loader: NeighborLoader for training data
+        val_loader: NeighborLoader for validation data
+        test_loader: NeighborLoader for test data
+        global_loader: NeighborLoader for full dataset
         device: Device to use for extraction
         target_node_type: Target node type for extraction
         embeddings_path: Path to save embeddings
         logger: Logger instance
+        disable_tqdm: Whether to disable tqdm progress bars
     
     Returns:
         Dictionary containing all embeddings and labels
     """
+    from graphssl.utils.training_utils import extract_embeddings
     
     logger.info("Extracting embeddings from model...")
+    
     logger.info("Extracting train embeddings...")
     train_embeddings, train_labels = extract_embeddings(
-        model, train_loader, device, target_node_type
+        model, train_loader, device, target_node_type, disable_tqdm=disable_tqdm
     )
+    
     logger.info("Extracting val embeddings...")
     val_embeddings, val_labels = extract_embeddings(
-        model, val_loader, device, target_node_type
+        model, val_loader, device, target_node_type, disable_tqdm=disable_tqdm
     )
+    
     logger.info("Extracting test embeddings...")
     test_embeddings, test_labels = extract_embeddings(
-        model, test_loader, device, target_node_type
+        model, test_loader, device, target_node_type, disable_tqdm=disable_tqdm
     )
+    
     logger.info("Extracting global embeddings...")
     global_embeddings, _ = extract_embeddings(
-        model, global_loader, device, target_node_type
+        model, global_loader, device, target_node_type, disable_tqdm=disable_tqdm
     )
     
     # Save embeddings

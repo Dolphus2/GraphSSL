@@ -105,7 +105,8 @@ python -m graphssl.main \
     --downstream_task both \
     --downstream_n_runs 10 \
     --downstream_hidden_dim 128 \
-    --downstream_epochs 100 \
+    --downstream_node_epochs 100 \
+    --downstream_link_epochs 10 \
     --seed 42
 
 echo ""

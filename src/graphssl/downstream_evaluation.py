@@ -11,6 +11,7 @@ from graphssl.utils.models import create_model
 from graphssl.utils.args_utils import parse_args
 
 logger = logging.getLogger(__name__)
+logger.setLevel("DEBUG")
 
 def run_pipeline(args):
     """Runs the GraphSSL downstream evaluation pipeline based on provided arguments."""
@@ -59,7 +60,7 @@ def run_pipeline(args):
         test_edge_msg_pass_prop=0.1
     )
     edge_splits = (train_edge_index, val_edge_index, test_edge_index)
-    logger.info(f"Data splits created: train={train_edge_index.size(1)}, val={val_edge_index.size(1)}, test={test_edge_index.size(1)}")
+    logger.info(f"Data edge splits created: train={train_edge_index.size(1)}, val={val_edge_index.size(1)}, test={test_edge_index.size(1)}")
     
     # Apply ToUndirected transform to original data for downstream evaluation
     logger.debug("Applying ToUndirected transform to full dataset")
@@ -134,7 +135,8 @@ def cli():
             "downstream_batch_size": args.downstream_batch_size,
             "downstream_lr": args.downstream_lr,
             "downstream_weight_decay": args.downstream_weight_decay,
-            "downstream_epochs": args.downstream_epochs,
+            "downstream_node_epochs": args.downstream_node_epochs,
+            "downstream_link_epochs": args.downstream_link_epochs,
             "downstream_patience": args.downstream_patience,
         }
     )

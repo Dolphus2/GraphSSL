@@ -167,7 +167,8 @@ For self-supervised edge:
 --downstream_eval                     # Run downstream evaluation
 --downstream_task both                # node/link/both
 --downstream_n_runs 10                # Number of evaluation runs
---downstream_epochs 100               # Downstream training epochs
+--downstream_node_epochs 100          # Downstream node classification epochs
+--downstream_link_epochs 10            # Downstream link prediction epochs
 ```
 
 ## Output Files

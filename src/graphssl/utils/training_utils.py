@@ -117,7 +117,8 @@ def train_epoch(
     device: torch.device,
     epoch: int,
     global_step: int,
-    log_interval: int = 20
+    log_interval: int = 20,
+    disable_tqdm: bool = False
 ) -> Tuple[Dict[str, float], int]:
     """
     Train the model for one epoch using a specified training objective.
@@ -131,6 +132,7 @@ def train_epoch(
         epoch: Epoch number
         global_step: Global training step counter
         log_interval: How often to log metrics
+        disable_tqdm: Whether to disable tqdm progress bars
     
     Returns:
         Tuple of (epoch_metrics dict, updated global_step)
@@ -143,7 +145,7 @@ def train_epoch(
     running_metrics = _initialize_metrics(metric_names)
     num_logged = 0
     
-    for batch in tqdm(loader, desc="Training", leave=False):
+    for batch in tqdm(loader, desc="Training", leave=False, disable=disable_tqdm):
         batch = batch.to(device)
         optimizer.zero_grad()
         
@@ -183,7 +185,8 @@ def evaluate(
     model: torch.nn.Module,
     loader: Union[NeighborLoader, LinkNeighborLoader],
     objective: TrainingObjective,
-    device: torch.device
+    device: torch.device,
+    disable_tqdm: bool = False
 ) -> Dict[str, float]:
     """
     Evaluate the model using a specified training objective.
@@ -193,6 +196,7 @@ def evaluate(
         loader: Data loader (validation or test)
         objective: Training objective defining the task (step function)
         device: Device to evaluate on
+        disable_tqdm: Whether to disable tqdm progress bars
     
     Returns:
         Dictionary of evaluation metrics
@@ -203,7 +207,7 @@ def evaluate(
     metric_names = objective.get_metric_names()
     total_metrics = _initialize_metrics(metric_names)
     
-    for batch in tqdm(loader, desc="Evaluating", leave=False):
+    for batch in tqdm(loader, desc="Evaluating", leave=False, disable=disable_tqdm):
         batch = batch.to(device)
         
         # Task-specific forward pass and loss computation
@@ -231,7 +235,8 @@ def train_model(
     early_stopping_patience: int = 10,
     checkpoint_dir: Optional[str] = None,
     verbose: bool = True,
-    metric_for_best: str = "acc"
+    metric_for_best: str = "acc",
+    disable_tqdm: bool = False
 ) -> Dict:
     """
     Train the model with early stopping using a specified training objective.
@@ -249,6 +254,7 @@ def train_model(
         checkpoint_dir: Directory to save model checkpoints (if None, saves to current directory)
         verbose: Whether to print progress
         metric_for_best: Metric to use for determining best model (default: 'acc')
+        disable_tqdm: Whether to disable tqdm progress bars
     
     Returns:
         Dictionary containing training history
@@ -280,12 +286,12 @@ def train_model(
         
         # Train
         train_metrics, global_step = train_epoch(
-            model, train_loader, optimizer, objective, device, epoch, global_step, log_interval
+            model, train_loader, optimizer, objective, device, epoch, global_step, log_interval, disable_tqdm
         )
         
         # Validate
         val_metrics = evaluate(
-            model, val_loader, objective, device
+            model, val_loader, objective, device, disable_tqdm
         )
         
         epoch_time = time.time() - start_time
@@ -354,7 +360,8 @@ def test_model(
     model: torch.nn.Module,
     test_loader: Union[NeighborLoader, LinkNeighborLoader],
     objective: TrainingObjective,
-    device: torch.device
+    device: torch.device,
+    disable_tqdm: bool = False
 ) -> Dict[str, float]:
     """
     Test the model on the test set using a specified training objective.
@@ -364,13 +371,14 @@ def test_model(
         test_loader: Test data loader
         objective: Training objective defining the task
         device: Device to evaluate on
+        disable_tqdm: Whether to disable tqdm progress bars
     
     Returns:
         Dictionary of test metrics
     """
     logger.info("Testing model on test set...")
     
-    test_metrics = evaluate(model, test_loader, objective, device)
+    test_metrics = evaluate(model, test_loader, objective, device, disable_tqdm)
     
     for key, value in test_metrics.items():
         logger.info(f"Test {key.capitalize()}: {value:.4f}")
@@ -384,7 +392,8 @@ def extract_embeddings(
     loader: NeighborLoader,
     device: torch.device,
     target_node_type: str = "paper",
-    return_labels: bool = True
+    return_labels: bool = True,
+    disable_tqdm: bool = False
 ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
     """
     Extract node embeddings from the trained model using NeighborLoader.
@@ -395,6 +404,7 @@ def extract_embeddings(
         device: Device to evaluate on
         target_node_type: Target node type for extraction
         return_labels: Whether to return labels alongside embeddings
+        disable_tqdm: Whether to disable tqdm progress bars
     
     Returns:
         Tuple of (embeddings, labels) if return_labels=True, else (embeddings, None)
@@ -404,7 +414,7 @@ def extract_embeddings(
     embeddings_list = []
     labels_list = [] if return_labels else None
     
-    for batch in tqdm(loader, desc="Extracting embeddings", leave=False):
+    for batch in tqdm(loader, desc="Extracting embeddings", leave=False, disable=disable_tqdm):
         batch = batch.to(device)
         
         # Forward pass
