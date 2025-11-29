@@ -96,7 +96,7 @@ def train_downstream_model(
                 elif key in total_metrics:
                     total_metrics[key] += value * batch_size
         
-        print(f"End of epoch {epoch+1}: train_total={total_metrics['total']}, train_correct={total_metrics['correct']}, train_loss={total_metrics.get('loss', 0.0)}")
+        # print(f"End of epoch {epoch+1}: train_total={total_metrics['total']}, train_correct={total_metrics['correct']}, train_loss={total_metrics.get('loss', 0.0)}")
         
         # Compute epoch averages
         train_metrics = {}
@@ -202,7 +202,7 @@ def evaluate_downstream_model(
             elif key in total_metrics:
                 total_metrics[key] += value * batch_size
     
-    print(f"End of evaluation: total={total_metrics['total']}, correct={total_metrics['correct']}, loss={total_metrics.get('loss', 0.0)}")
+    # print(f"End of evaluation: total={total_metrics['total']}, correct={total_metrics['correct']}, loss={total_metrics.get('loss', 0.0)}")
     
     # Compute averages
     eval_metrics = {}

@@ -2,11 +2,11 @@
 #BSUB -J gssl_ssl_sce
 #BSUB -o logs/exp_ssl_node_sce_%J.out
 #BSUB -e logs/exp_ssl_node_sce_%J.err
-#BSUB -q gpua100
+#BSUB -q gpuv100
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -n 4
 #BSUB -R "span[hosts=1]"
-#BSUB -R "rusage[mem=16GB]"
+#BSUB -R "rusage[mem=8GB]"
 #BSUB -W 24:00 
 #BSUB -B 
 #BSUB -N 
@@ -83,6 +83,7 @@ python -m graphssl.main \
     --downstream_node_epochs 100 \
     --downstream_link_epochs 10 \
     --downstream_patience 20 \
+    --downstream_lr 0.0001 \
     --edge_msg_pass_prop 0 0 0 \
     --seed 42 \
     --disable_tqdm

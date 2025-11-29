@@ -1,7 +1,7 @@
 #!/bin/bash
-#BSUB -J gssl_ssl_tarpfp
-#BSUB -o logs/exp_ssl_tarpfp_%J.out
-#BSUB -e logs/exp_ssl_tarpfp_%J.err
+#BSUB -J gssl_ssl_sce
+#BSUB -o logs/exp_ssl_node_sce_%J.out
+#BSUB -e logs/exp_ssl_node_sce_%J.err
 #BSUB -q gpuv100
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -n 4
@@ -11,13 +11,13 @@
 #BSUB -B 
 #BSUB -N 
 #
-# Experiment 5: Self-Supervised Combined (MER + TAR + PFP)
-# Training: Combined masked edge reconstruction, type-aware regularization, and path feature prediction
-# Encoder: GraphSAGE encoder with multiple decoders (HGMAE-style)
-# Submit: bsub < scripts/hpc/exp_ssl_tarpfp.sh
+# Experiment 3: Self-Supervised Node Reconstruction (SCE)
+# Training: Masked node feature reconstruction with SCE loss
+# Encoder: GraphSAGE encoder + feature decoder
+# Submit: bsub < scripts/hpc/exp_ssl_node_sce.sh
 #
 
-echo "Starting Experiment: Self-Supervised Combined (MER + TAR + PFP)"
+echo "Starting Experiment: Self-Supervised Node Reconstruction (SCE)"
 echo "=============================================="
 echo "Job ID: $LSB_JOBID"
 echo "Hostname: $(hostname)"
@@ -56,16 +56,12 @@ echo ""
 # Run experiment
 python -m graphssl.main \
     --data_root data \
-    --results_root results/exp_ssl_tarpfp_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
-    --objective_type self_supervised_tarpfp \
+    --results_root results/exp_ssl_node_sce_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
+    --objective_type self_supervised_node \
+    --loss_fn mse \
     --target_node "paper" \
     --target_edge_type "paper,has_topic,field_of_study" \
-    --mer_weight 1.0 \
-    --tar_weight 1.0 \
-    --pfp_weight 1.0 \
     --mask_ratio 0.5 \
-    --neg_sampling_ratio 1.0 \
-    --tar_temperature 0.5 \
     --hidden_channels 128 \
     --num_layers 2 \
     --num_neighbors 30 30 \
