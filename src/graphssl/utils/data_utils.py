@@ -683,15 +683,22 @@ def val_to_inductive(data: HeteroData, node_type: str, seed: int = 42) -> Hetero
     
     node_mapping = torch.full((len(train_mask),), -1, device=train_mask.device)
     perm = torch.randperm(N_train + N_val, generator=torch.Generator().manual_seed(seed), device=train_mask.device)
-    node_mapping[train_mask] = perm[:N_train]
-    node_mapping[val_mask] = perm[N_train:]
     
     combined_mask = train_mask | val_mask
-    data[node_type].x = data[node_type].x[combined_mask]
-    data[node_type].y = data[node_type].y[combined_mask]
-    data[node_type].year = data[node_type].year[combined_mask]
-    data[node_type].train_mask = torch.zeros(N_train + N_val, dtype=torch.bool, device=train_mask.device).scatter_(0, node_mapping[train_mask], True)
-    data[node_type].val_mask = torch.zeros(N_train + N_val, dtype=torch.bool, device=train_mask.device).scatter_(0, node_mapping[val_mask], True)
+
+    old_idx = combined_mask.non_zero(as_tuple=False).view(-1)
+    new_oder_old_idx = old_idx[perm]
+    kept_train = train_mask[old_idx]
+    kept_val = val_mask[old_idx]
+
+    node_mapping[train_mask] = perm[:N_train]
+    node_mapping[val_mask] = perm[N_train:]
+
+    data[node_type].x = data[node_type].x[new_oder_old_idx]
+    data[node_type].y = data[node_type].y[new_oder_old_idx]
+    data[node_type].year = data[node_type].year[new_oder_old_idx]
+    data[node_type].train_mask = kept_train[perm]
+    data[node_type].val_mask = kept_val[perm]
     data[node_type].test_mask = torch.zeros(N_train + N_val, dtype=torch.bool, device=train_mask.device)
     
     _remap_and_filter_edges(data, node_type, node_mapping)
