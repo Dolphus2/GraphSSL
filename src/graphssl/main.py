@@ -190,7 +190,7 @@ def run_pipeline(args):
         # Create optional edge decoder if specified
         decoder = None
         if args.use_edge_decoder:
-            decoder = EdgeDecoder(hidden_dim=args.hidden_channels, dropout=args.dropout)
+            decoder = EdgeDecoder(hidden_dim=args.hidden_channels, dropout=args.dropout).to(device)
             logger.info("Using MLP-based edge decoder")
         objective = SupervisedLinkPrediction(
             target_edge_type=target_edge_type,
@@ -207,7 +207,7 @@ def run_pipeline(args):
                 hidden_dim=args.hidden_channels,
                 feature_dim=feature_dim,
                 dropout=args.dropout
-            )
+            ).to(device)
             logger.info("Using MLP-based feature decoder")
         objective = SelfSupervisedNodeReconstruction(
             target_node_type=args.target_node,
@@ -223,7 +223,7 @@ def run_pipeline(args):
         # Create optional edge decoder
         decoder = None
         if args.use_edge_decoder:
-            decoder = EdgeDecoder(hidden_dim=args.hidden_channels, dropout=args.dropout)
+            decoder = EdgeDecoder(hidden_dim=args.hidden_channels, dropout=args.dropout).to(device)
             logger.info("Using MLP-based edge decoder")
         objective = SelfSupervisedEdgeReconstruction(
             target_edge_type=target_edge_type,
@@ -235,18 +235,19 @@ def run_pipeline(args):
     elif args.objective_type == "self_supervised_tarpfp":
         attr_dim = data[args.target_node].x.shape[1]
         # optional decoder for TAR and PFP features, if needed
+        # NOTE: Move decoders to device to avoid CPU/CUDA tensor mismatch in step()
         attr_decoder = FeatureDecoder(
             hidden_dim=args.hidden_channels,
             feature_dim=attr_dim,
             dropout=args.dropout
-        )
+        ).to(device)
         if args.lambda_pfp > 0:
             pos_dim = data[args.target_node].pos.shape[1]
             pos_decoder = FeatureDecoder(
                 hidden_dim=args.hidden_channels,
                 feature_dim=pos_dim,
                 dropout=args.dropout
-            )
+            ).to(device)
         else:
             pos_decoder = None
         objective = SelfSupervisedTARPFP(
