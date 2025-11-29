@@ -678,13 +678,12 @@ def val_to_inductive(data: HeteroData, node_type: str, seed: int = 42) -> Hetero
     """Keep train+val nodes, remap indices randomly."""
     train_mask = data[node_type].train_mask.clone()
     val_mask = data[node_type].val_mask.clone()
+    combined_mask = train_mask | val_mask
     N_train = train_mask.sum().item()
     N_val = val_mask.sum().item()
     
-    node_mapping = torch.full((len(train_mask),), -1, device=train_mask.device)
-    perm = torch.randperm(N_train + N_val, generator=torch.Generator().manual_seed(seed), device=train_mask.device)
-    node_mapping[train_mask] = perm[:N_train]
-    node_mapping[val_mask] = perm[N_train:]
+    node_mapping = torch.full((len(combined_mask),), -1, device=train_mask.device)
+    node_mapping[combined_mask] = torch.arange(N_train + N_val, device=train_mask.device)
     
     combined_mask = train_mask | val_mask
     data[node_type].x = data[node_type].x[combined_mask]
