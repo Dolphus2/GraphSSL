@@ -693,6 +693,7 @@ def val_to_inductive(data: HeteroData, node_type: str, seed: int = 42) -> Hetero
     data[node_type].val_mask = torch.zeros(N_train + N_val, dtype=torch.bool, device=train_mask.device).scatter_(0, node_mapping[val_mask], True)
     data[node_type].test_mask = torch.zeros(N_train + N_val, dtype=torch.bool, device=train_mask.device)
     
+    
     _remap_and_filter_edges(data, node_type, node_mapping)
     
     return data
