@@ -17,6 +17,7 @@ import numpy as np
 from tqdm import tqdm
 from pathlib import Path
 import wandb
+from sklearn.metrics import confusion_matrix
 
 
 logger = logging.getLogger(__name__)
@@ -837,6 +838,8 @@ def evaluate_link_prediction_multiclass(
     test_losses = []
     test_precisions = []
     test_recalls = []
+    test_accuracies = []
+    confusion_matrices = []
     
     for run in range(n_runs):
         if verbose:
@@ -891,13 +894,47 @@ def evaluate_link_prediction_multiclass(
         test_precision = test_metrics.get('precision', 0.0)
         test_recall = test_metrics.get('recall', 0.0)
         
+        # Compute confusion matrix and accuracy for this run
+        all_preds = []
+        all_labels = []
+        decoder.eval()
+        with torch.no_grad():
+            for batch in test_loader:
+                source_embeddings, pos_targets_list, msg_pass_targets_list = batch
+                source_embeddings = source_embeddings.to(device)
+                
+                # Forward pass
+                projected_embeddings = decoder(source_embeddings)
+                logits = torch.matmul(projected_embeddings, target_embeddings.T)
+                predictions = (torch.sigmoid(logits) > 0.5).cpu().numpy()
+                
+                # Create labels
+                labels = np.zeros_like(predictions)
+                for i, pos_targets in enumerate(pos_targets_list):
+                    if len(pos_targets) > 0:
+                        labels[i, pos_targets.cpu().numpy()] = 1
+                
+                all_preds.append(predictions)
+                all_labels.append(labels)
+        
+        all_preds = np.vstack(all_preds)
+        all_labels = np.vstack(all_labels)
+        
+        # Compute accuracy
+        test_accuracy = (all_preds == all_labels).mean()
+        
+        # Compute confusion matrix (flatten to binary classification)
+        cm = confusion_matrix(all_labels.flatten(), all_preds.flatten(), labels=[0, 1])
+        
         test_f1_scores.append(test_f1)
         test_losses.append(test_loss)
         test_precisions.append(test_precision)
         test_recalls.append(test_recall)
+        test_accuracies.append(test_accuracy)
+        confusion_matrices.append(cm)
         
         if verbose:
-            logger.info(f"Run {run+1} - Test Loss: {test_loss:.4f}, Test F1: {test_f1:.4f}, Precision: {test_precision:.4f}, Recall: {test_recall:.4f}")
+            logger.info(f"Run {run+1} - Test Loss: {test_loss:.4f}, Test F1: {test_f1:.4f}, Accuracy: {test_accuracy:.4f}, Precision: {test_precision:.4f}, Recall: {test_recall:.4f}")
         
         # Log to wandb (including training history)
         wandb.log({
@@ -918,15 +955,21 @@ def evaluate_link_prediction_multiclass(
         'test_precision_std': np.std(test_precisions),
         'test_recall_mean': np.mean(test_recalls),
         'test_recall_std': np.std(test_recalls),
+        'test_acc_mean': np.mean(test_accuracies),
+        'test_acc_std': np.std(test_accuracies),
         'test_f1_scores': test_f1_scores,
         'test_losses': test_losses,
         'test_precisions': test_precisions,
         'test_recalls': test_recalls,
+        'test_accuracies': test_accuracies,
+        'confusion_matrix': np.mean(confusion_matrices, axis=0),  # Average confusion matrix
+        'confusion_matrices': confusion_matrices,  # All confusion matrices
     }
     
     logger.info("\n" + "="*80)
     logger.info("Link Prediction as Multiclass Results")
     logger.info("="*80)
+    logger.info(f"Test Accuracy: {results['test_acc_mean']:.4f} ± {results['test_acc_std']:.4f}")
     logger.info(f"Test F1: {results['test_f1_mean']:.4f} ± {results['test_f1_std']:.4f}")
     logger.info(f"Test Precision: {results['test_precision_mean']:.4f} ± {results['test_precision_std']:.4f}")
     logger.info(f"Test Recall: {results['test_recall_mean']:.4f} ± {results['test_recall_std']:.4f}")
@@ -934,6 +977,8 @@ def evaluate_link_prediction_multiclass(
     
     # Log summary to wandb
     wandb.log({
+        "downstream_link_multiclass/test_acc_mean": results['test_acc_mean'],
+        "downstream_link_multiclass/test_acc_std": results['test_acc_std'],
         "downstream_link_multiclass/test_f1_mean": results['test_f1_mean'],
         "downstream_link_multiclass/test_f1_std": results['test_f1_std'],
         "downstream_link_multiclass/test_precision_mean": results['test_precision_mean'],

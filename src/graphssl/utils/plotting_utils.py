@@ -364,6 +364,18 @@ def plot_all_results(
         except (ValueError, KeyError) as e:
             pass  # Metric not available
     
+    # Plot confusion matrix for link multiclass
+    try:
+        fig = plot_confusion_matrix(
+            results_path,
+            save_path=save_dir / 'confusion_matrix.png' if save_dir else None,
+            show=show
+        )
+        if fig is not None:
+            figures['confusion_matrix'] = fig
+    except (ValueError, KeyError) as e:
+        pass  # Confusion matrix not available
+    
     return figures
 
 
@@ -418,6 +430,8 @@ def print_results_summary(results_path: Path) -> None:
     if 'downstream_link_multiclass' in results:
         link_res = results['downstream_link_multiclass']
         print("\n--- Downstream Link Prediction (Multiclass) ---")
+        if 'test_acc_mean' in link_res:
+            print(f"Test Accuracy: {link_res['test_acc_mean']:.4f} ± {link_res['test_acc_std']:.4f}")
         if 'test_f1_mean' in link_res:
             print(f"Test F1: {link_res['test_f1_mean']:.4f} ± {link_res['test_f1_std']:.4f}")
         if 'test_precision_mean' in link_res:
@@ -432,3 +446,89 @@ def print_results_summary(results_path: Path) -> None:
         print(f"Test Loss: {link_res['test_loss_mean']:.4f} ± {link_res['test_loss_std']:.4f}")
     
     print("=" * 80)
+
+
+def plot_confusion_matrix(
+    results_path: Path,
+    normalize: bool = True,
+    save_path: Optional[Path] = None,
+    show: bool = True
+) -> Optional[plt.Figure]:
+    """
+    Plot confusion matrix for link prediction multiclass classification.
+    
+    Args:
+        results_path: Path to results directory
+        normalize: Whether to normalize the confusion matrix
+        save_path: Path to save the figure (if None, doesn't save)
+        show: Whether to display the plot
+    
+    Returns:
+        matplotlib Figure object if confusion matrix exists, None otherwise
+    """
+    results = load_results(results_path)
+    
+    if 'downstream_link_multiclass' not in results:
+        print(f"No downstream_link_multiclass results found in {results_path}")
+        return None
+    
+    link_res = results['downstream_link_multiclass']
+    
+    if 'confusion_matrix' not in link_res:
+        print(f"No confusion matrix found in downstream_link_multiclass results")
+        return None
+    
+    cm = link_res['confusion_matrix']
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(8, 6))
+    
+    # Normalize if requested
+    if normalize:
+        cm_display = cm.astype('float') / cm.sum(axis=1)[:, np.newaxis]
+        fmt = '.2%'
+        title = 'Normalized Confusion Matrix\n(Link Prediction Multiclass)'
+    else:
+        cm_display = cm
+        fmt = '.0f'
+        title = 'Confusion Matrix\n(Link Prediction Multiclass)'
+    
+    # Plot heatmap
+    im = ax.imshow(cm_display, interpolation='nearest', cmap='Blues')
+    ax.figure.colorbar(im, ax=ax)
+    
+    # Set labels
+    classes = ['No Link', 'Link']
+    ax.set(xticks=np.arange(cm.shape[1]),
+           yticks=np.arange(cm.shape[0]),
+           xticklabels=classes,
+           yticklabels=classes,
+           title=title,
+           ylabel='True Label',
+           xlabel='Predicted Label')
+    
+    # Rotate the tick labels for better readability
+    plt.setp(ax.get_xticklabels(), rotation=45, ha="right", rotation_mode="anchor")
+    
+    # Add text annotations
+    thresh = cm_display.max() / 2.
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            if normalize:
+                text = f'{cm_display[i, j]:.1%}\n({cm[i, j]:.0f})'
+            else:
+                text = f'{cm[i, j]:.0f}'
+            ax.text(j, i, text,
+                   ha="center", va="center",
+                   color="white" if cm_display[i, j] > thresh else "black",
+                   fontsize=12)
+    
+    plt.tight_layout()
+    
+    if save_path:
+        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    
+    if show:
+        plt.show()
+    
+    return fig
