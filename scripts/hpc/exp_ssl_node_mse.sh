@@ -2,7 +2,7 @@
 #BSUB -J gssl_ssl_sce
 #BSUB -o logs/exp_ssl_node_sce_%J.out
 #BSUB -e logs/exp_ssl_node_sce_%J.err
-#BSUB -q gpuv100
+#BSUB -q gpua100
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -n 4
 #BSUB -R "span[hosts=1]"

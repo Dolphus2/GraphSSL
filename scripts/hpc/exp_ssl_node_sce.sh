@@ -1,5 +1,5 @@
 #!/bin/bash
-#BSUB -J gssl_ssl_sce
+#BSUB -J gssl_ssl_sce_rand_feat
 #BSUB -o logs/exp_ssl_node_sce_%J.out
 #BSUB -e logs/exp_ssl_node_sce_%J.err
 #BSUB -q gpuv100
@@ -67,7 +67,7 @@ python -m graphssl.main \
     --num_neighbors 30 30 \
     --batch_size 1024 \
     --epochs 100 \
-    --lr 0.001 \
+    --lr 0.0001 \
     --dropout 0.5 \
     --patience 20 \
     --num_workers 4 \

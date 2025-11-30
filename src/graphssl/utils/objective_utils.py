@@ -220,37 +220,64 @@ class DownstreamLinkMulticlass(TrainingObjective):
         source_embeddings, pos_targets_list, msg_pass_targets_list = batch
         batch_size = source_embeddings.size(0)
         
+        # Forward pass
         projected_embeddings = self.decoder(source_embeddings)
-        logits = torch.matmul(projected_embeddings, self.target_embeddings.T)
-        Ahat = torch.sigmoid(logits)
+        logits = torch.matmul(projected_embeddings, self.target_embeddings.T)  # [batch_size, num_classes]
 
+        # Create sparse index tensors
         src_idxs_local, trg_idxs_local = self.create_idxs_local(pos_targets_list)
         msg_pass_src_idxs, msg_pass_trg_idxs = self.create_idxs_local(msg_pass_targets_list)
         
-        # Calculate positive weight
-        num_positive = src_idxs_local.size(0)
-        num_total = batch_size * self.num_classes
-        num_negative = num_total - num_positive - msg_pass_src_idxs.size(0)
-        pos_weight = num_negative / (num_positive + self.eps)
+        # Create dense label tensor: 0 = negative, 1 = positive, -1 = masked (ignore)
+        # Initialize all as negatives
+        labels = torch.zeros_like(logits)
         
-        neg_likelihood = self.calculate_neg_log_likelihood(
-            Ahat, src_idxs_local, trg_idxs_local, pos_weight,
-            msg_pass_src_idxs, msg_pass_trg_idxs
+        # Set positive supervision edges to 1
+        if src_idxs_local.numel() > 0:
+            labels[src_idxs_local, trg_idxs_local] = 1.0
+        
+        # Set message passing edges to -1 (will be masked)
+        if msg_pass_src_idxs.numel() > 0:
+            labels[msg_pass_src_idxs, msg_pass_trg_idxs] = -1.0
+        
+        # Create mask for valid entries (not message passing)
+        mask = (labels != -1.0)
+        
+        # Calculate positive weight for class imbalance
+        num_positive = src_idxs_local.size(0)
+        num_total = mask.sum().item()
+        num_negative = num_total - num_positive
+        pos_weight = num_negative / (num_positive + self.eps) if num_positive > 0 else 1.0
+        
+        # Compute weighted binary cross entropy loss
+        # Only on non-masked entries
+        bce_loss = F.binary_cross_entropy_with_logits(
+            logits[mask],
+            labels[mask],
+            pos_weight=torch.tensor([pos_weight], device=logits.device)
         )
-        loss = neg_likelihood.mean()
+        loss = bce_loss
         
         # Compute metrics
         with torch.no_grad():
-            predictions = (Ahat > 0.5).float()
-            tp = predictions[src_idxs_local, trg_idxs_local].sum().item()
+            # Get predictions from logits
+            predictions = (torch.sigmoid(logits) > 0.5).float()
+            
+            # True positives: correctly predicted positive edges
+            tp = predictions[src_idxs_local, trg_idxs_local].sum().item() if src_idxs_local.numel() > 0 else 0
+            
+            # False negatives: positive edges predicted as negative
             fn = num_positive - tp
-            fp = predictions.sum().item() - tp
-            # Subtract false positives from message passing edges
-            if msg_pass_src_idxs.numel() > 0:
-                fp -= predictions[msg_pass_src_idxs, msg_pass_trg_idxs].sum().item()
+            
+            # False positives: need to count predictions=1 where labels=0 (excluding masked)
+            # All predictions that are 1, minus true positives, minus any on masked edges
+            fp = predictions[mask].sum().item() - tp
+            
+            # Ensure fp is non-negative
+            fp = max(0, fp)
             
             precision = tp / (tp + fp + self.eps)
-            recall = tp / (tp + fn + self.eps)
+            recall = tp / (tp + fn + self.eps) if num_positive > 0 else 0.0
             f1 = 2 * precision * recall / (precision + recall + self.eps)
         
         metrics = {
@@ -274,41 +301,7 @@ class DownstreamLinkMulticlass(TrainingObjective):
     
     def get_metric_names(self) -> list:
         return ["loss", "f1", "precision", "recall"]
-    
-    def calculate_neg_log_likelihood(
-        self, 
-        Ahat, 
-        src_idxs_local, 
-        trg_idxs_local, 
-        pos_weight,
-        msg_pass_src_idxs,
-        msg_pass_trg_idxs
-    ) -> torch.Tensor:
-        """
-        Calculate negative log-likelihood loss with optional masking of message passing edges.
-        
-        Args:
-            Ahat: Predicted adjacency matrix probabilities [batch_size, num_targets]
-            src_idxs_local: Source indices for positive (supervision) edges
-            trg_idxs_local: Target indices for positive (supervision) edges
-            pos_weight: Weight for positive edges
-            msg_pass_src_idxs: Source indices for message passing edges to mask out (may be empty)
-            msg_pass_trg_idxs: Target indices for message passing edges to mask out (may be empty)
-        
-        Returns:
-            Negative log-likelihood loss tensor [batch_size, num_targets]
-        """
-        Ahat = 1 - Ahat  # assume all edges are negative
-        Ahat[src_idxs_local, trg_idxs_local] = (Ahat[src_idxs_local, trg_idxs_local] - 1) * (-1)  # Invert positive edges
-        neg_likelihood = (-torch.log(Ahat + self.eps))
-        neg_likelihood *= self.neg_weight
-        neg_likelihood[src_idxs_local, trg_idxs_local] *= (pos_weight * (1 / self.neg_weight))
-        
-        # Mask out message passing edges by setting their loss to 0 (if any exist)
-        if msg_pass_src_idxs.numel() > 0:
-            neg_likelihood[msg_pass_src_idxs, msg_pass_trg_idxs] = 0.0
-        
-        return neg_likelihood
+
 
 class SupervisedLinkPrediction(TrainingObjective):
     """
@@ -439,7 +432,10 @@ class SelfSupervisedNodeReconstruction(TrainingObjective):
             num_nodes = original_features.size(0)
             node_mask = torch.rand(num_nodes, device=original_features.device) < self.mask_ratio
             # Expand to all features (columnwise masking)
-            mask = node_mask.unsqueeze(1).expand_as(original_features)
+            # mask = node_mask.unsqueeze(1).expand_as(original_features)
+            # batch.x_dict[self.target_node_type] = original_features.masked_fill(mask, 0.0)
+            # Or random feature masking
+            mask = torch.rand_like(original_features) < self.mask_ratio
             batch.x_dict[self.target_node_type] = original_features.masked_fill(mask, 0.0)
         
         # Forward pass through encoder
