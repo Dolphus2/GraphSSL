@@ -201,6 +201,7 @@ class DownstreamLinkMulticlass(TrainingObjective):
         self.device = device
         self.eps = 1e-10
         self.neg_weight = 1.0
+        self.gamma = 3
         
     
     def step(
@@ -242,12 +243,12 @@ class DownstreamLinkMulticlass(TrainingObjective):
         num_positive = src_idxs_local.size(0)
         num_total = batch_size * self.num_classes
         num_negative = num_total - num_positive - msg_pass_src_idxs.size(0)
-        # pos_weight = num_negative / (num_positive + self.eps) if num_positive > 0 else 1.0
-        pos_weight = 1
+        # Inverse Frequency
+        pos_weight = num_negative / (num_positive + self.eps) if num_positive > 0 else 1.0
         
         neg_likelihood = self.calculate_neg_log_likelihood(
             Ahat, src_idxs_local, trg_idxs_local, pos_weight,
-            msg_pass_src_idxs, msg_pass_trg_idxs
+            msg_pass_src_idxs, msg_pass_trg_idxs, focal_loss=True
         )
         loss = neg_likelihood.mean()
         
@@ -377,10 +378,15 @@ class DownstreamLinkMulticlass(TrainingObjective):
         trg_idxs_local, 
         pos_weight,
         msg_pass_src_idxs,
-        msg_pass_trg_idxs
+        msg_pass_trg_idxs,
+        focal_loss = False
     ) -> torch.Tensor:
         """
-        Calculate negative log-likelihood loss with optional masking of message passing edges.
+        Calculate negative log-likelihood loss with optional focal loss weighting.
+        
+        Focal loss down-weights easy examples:
+        - For negatives (label=0): FL = (p_t)^gamma * CE = (Ahat)^gamma * (-log(1-Ahat))
+        - For positives (label=1): FL = (1-p_t)^gamma * CE = (1-Ahat)^gamma * (-log(Ahat))
         
         Args:
             Ahat: Predicted adjacency matrix probabilities [batch_size, num_targets]
@@ -389,16 +395,26 @@ class DownstreamLinkMulticlass(TrainingObjective):
             pos_weight: Weight for positive edges
             msg_pass_src_idxs: Source indices for message passing edges to mask out (may be empty)
             msg_pass_trg_idxs: Target indices for message passing edges to mask out (may be empty)
+            focal_loss: Whether to apply focal loss weighting
         
         Returns:
             Negative log-likelihood loss tensor [batch_size, num_targets]
         """
+        p_positive = Ahat.clone()
         Ahat = 1 - Ahat  # assume all edges are negative
         Ahat[src_idxs_local, trg_idxs_local] = (Ahat[src_idxs_local, trg_idxs_local] - 1) * (-1)  # Invert positive edges
         neg_likelihood = (-torch.log(Ahat + self.eps))
         neg_likelihood *= self.neg_weight
         neg_likelihood[src_idxs_local, trg_idxs_local] *= (pos_weight * (1 / self.neg_weight))
-        
+
+        # Apply focal loss 
+        if focal_loss:
+            # Focal weight for negatives: down-weight easy negatives where model is confident (p_positive is low)
+            # When p_positive → 0 (confident it's negative), focal_weight → 0 
+            focal_weight = p_positive ** self.gamma
+            # Apply focal modulation only to negatives (positives keep pos_weight)
+            focal_weight[src_idxs_local, trg_idxs_local] = 1
+            neg_likelihood *= focal_weight
         # Mask out message passing edges by setting their loss to 0 (if any exist)
         if msg_pass_src_idxs.numel() > 0:
             neg_likelihood[msg_pass_src_idxs, msg_pass_trg_idxs] = 0.0
