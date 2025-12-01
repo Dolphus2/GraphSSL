@@ -1,5 +1,5 @@
 #!/bin/bash
-#BSUB -J gssl_ssl_sce_rand_feat
+#BSUB -J gssl_ssl_sce
 #BSUB -o logs/exp_ssl_node_sce_%J.out
 #BSUB -e logs/exp_ssl_node_sce_%J.err
 #BSUB -q gpuv100
@@ -83,10 +83,10 @@ python -m graphssl.main \
     --downstream_num_layers 2 \
     --downstream_dropout 0.5 \
     --downstream_node_epochs 100 \
-    --downstream_link_epochs 5 \
+    --downstream_link_epochs 3 \
     --downstream_patience 20 \
     --downstream_lr 0.0001 \
-    --edge_msg_pass_prop 0.8 0.8 0.8 \
+    --edge_msg_pass_prop 0 0 0 \
     --seed 42 \
     --disable_tqdm
 
