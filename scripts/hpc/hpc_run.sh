@@ -60,6 +60,8 @@ python -m graphssl.main \
     --objective_type supervised_node_classification \
     --target_node "paper" \
     --target_edge_type "paper,has_topic,field_of_study" \
+    --use_feature_decoder \
+    --use_edge_decoder \
     --hidden_channels 128 \
     --num_layers 2 \
     --num_neighbors 30 30 \

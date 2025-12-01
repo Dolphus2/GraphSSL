@@ -29,6 +29,8 @@ python -m graphssl.main \
     --objective_type supervised_node_classification \
     --target_node "paper" \
     --target_edge_type "paper,has_topic,field_of_study" \
+    --use_feature_decoder \
+    --use_edge_decoder \
     --hidden_channels 64 \
     --num_layers 2 \
     --num_neighbors 10 10 \
@@ -64,6 +66,8 @@ python -m graphssl.main \
     --objective_type supervised_link_prediction \
     --target_node "paper" \
     --target_edge_type "paper,cites,paper" \
+    --use_feature_decoder \
+    --use_edge_decoder \
     --hidden_channels 64 \
     --num_layers 2 \
     --num_neighbors 10 10 \
@@ -101,6 +105,8 @@ python -m graphssl.main \
     --loss_fn sce \
     --target_node "paper" \
     --target_edge_type "paper,has_topic,field_of_study" \
+    --use_feature_decoder \
+    --use_edge_decoder \
     --mask_ratio 0.5 \
     --hidden_channels 64 \
     --num_layers 2 \
@@ -138,6 +144,8 @@ python -m graphssl.main \
     --loss_fn bce \
     --target_node "paper" \
     --target_edge_type "paper,cites,paper" \
+    --use_feature_decoder \
+    --use_edge_decoder \
     --neg_sampling_ratio 1.0 \
     --hidden_channels 64 \
     --num_layers 2 \
@@ -174,7 +182,9 @@ python -m graphssl.main \
     --objective_type self_supervised_tarpfp \
     --target_node "paper" \
     --target_edge_type "paper,has_topic,field_of_study" \
-    --mer_weight 1.0 \
+    --use_feature_decoder \
+    --use_edge_decoder \
+    --mer_weight 0.0 \
     --tar_weight 1.0 \
     --pfp_weight 1.0 \
     --mask_ratio 0.5 \

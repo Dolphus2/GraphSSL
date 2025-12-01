@@ -1,7 +1,7 @@
 #!/bin/bash
-#BSUB -J gssl_sup_node
-#BSUB -o logs/exp_supervised_node_%J.out
-#BSUB -e logs/exp_supervised_node_%J.err
+#BSUB -J gssl_ssl_tar
+#BSUB -o logs/exp_ssl_tar_%J.out
+#BSUB -e logs/exp_ssl_tar_%J.err
 #BSUB -q gpuv100
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -n 4
@@ -11,13 +11,13 @@
 #BSUB -B 
 #BSUB -N 
 #
-# Experiment 1: Supervised Node Classification
-# Training: Supervised learning for venue prediction
-# Encoder: Standard heterogeneous GraphSAGE
-# Submit: bsub < scripts/hpc/exp_supervised_node.sh
+# Experiment: Self-Supervised TAR (Type-Aware Regularization)
+# Training: Type-aware regularization loss only (TAR component)
+# Encoder: GraphSAGE encoder with feature decoder
+# Submit: bsub < scripts/hpc/exp_ssl_tar.sh
 #
 
-echo "Starting Experiment: Supervised Node Classification"
+echo "Starting Experiment: Self-Supervised TAR (Type-Aware Regularization)"
 echo "=============================================="
 echo "Job ID: $LSB_JOBID"
 echo "Hostname: $(hostname)"
@@ -56,12 +56,18 @@ echo ""
 # Run experiment
 python -m graphssl.main \
     --data_root data \
-    --results_root results/exp_supervised_node_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
-    --objective_type supervised_node_classification \
+    --results_root results/exp_ssl_tar_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
+    --objective_type self_supervised_tarpfp \
     --target_node "paper" \
     --target_edge_type "paper,has_topic,field_of_study" \
     --use_feature_decoder \
     --use_edge_decoder \
+    --mer_weight 0.0 \
+    --tar_weight 1.0 \
+    --pfp_weight 1.0 \
+    --mask_ratio 0.5 \
+    --neg_sampling_ratio 1.0 \
+    --tar_temperature 0.5 \
     --hidden_channels 128 \
     --num_layers 2 \
     --num_neighbors 30 30 \

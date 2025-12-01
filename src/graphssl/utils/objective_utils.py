@@ -7,6 +7,7 @@ import torch
 import torch.nn.functional as F
 from abc import ABC, abstractmethod
 from typing import Dict, Tuple, Optional, Any
+from graphssl.utils.models import MLPClassifier, EdgeDecoder
 
 logger = logging.getLogger(__name__)
 loss_functions = ['mse', 'sce']
@@ -182,16 +183,19 @@ class DownstreamLinkMulticlass(TrainingObjective):
         self,
         decoder: torch.nn.Module,
         target_embeddings: torch.Tensor,
-        device: torch.device
+        device: torch.device,
+        target_decoder: Optional[torch.nn.Module] = None
     ):
         """
         Args:
             decoder: MLP that projects source embeddings to target embedding space
             target_embeddings: All target node embeddings [num_targets, hidden_dim]
             device: Device for computation
+            target_decoder: Optional MLP to project target embeddings (should match decoder architecture)
         """
         super().__init__(target_node_type="embeddings")
         self.decoder = decoder
+        self.target_decoder = target_decoder
         self.target_embeddings = target_embeddings.to(device)
         self.num_classes = target_embeddings.size(0)
         self.device = device
@@ -220,64 +224,45 @@ class DownstreamLinkMulticlass(TrainingObjective):
         source_embeddings, pos_targets_list, msg_pass_targets_list = batch
         batch_size = source_embeddings.size(0)
         
-        # Forward pass
         projected_embeddings = self.decoder(source_embeddings)
-        logits = torch.matmul(projected_embeddings, self.target_embeddings.T)  # [batch_size, num_classes]
+        
+        # Project target embeddings if target_decoder is provided
+        if self.target_decoder is not None:
+            projected_target_embeddings = self.target_decoder(self.target_embeddings)
+        else:
+            projected_target_embeddings = self.target_embeddings
+        
+        logits = torch.matmul(projected_embeddings, projected_target_embeddings.T) # [batch_size, num_classes]
+        Ahat = torch.sigmoid(logits)
 
-        # Create sparse index tensors
         src_idxs_local, trg_idxs_local = self.create_idxs_local(pos_targets_list)
         msg_pass_src_idxs, msg_pass_trg_idxs = self.create_idxs_local(msg_pass_targets_list)
         
-        # Create dense label tensor: 0 = negative, 1 = positive, -1 = masked (ignore)
-        # Initialize all as negatives
-        labels = torch.zeros_like(logits)
-        
-        # Set positive supervision edges to 1
-        if src_idxs_local.numel() > 0:
-            labels[src_idxs_local, trg_idxs_local] = 1.0
-        
-        # Set message passing edges to -1 (will be masked)
-        if msg_pass_src_idxs.numel() > 0:
-            labels[msg_pass_src_idxs, msg_pass_trg_idxs] = -1.0
-        
-        # Create mask for valid entries (not message passing)
-        mask = (labels != -1.0)
-        
-        # Calculate positive weight for class imbalance
+        # Calculate positive weight
         num_positive = src_idxs_local.size(0)
-        num_total = mask.sum().item()
-        num_negative = num_total - num_positive
-        pos_weight = num_negative / (num_positive + self.eps) if num_positive > 0 else 1.0
+        num_total = batch_size * self.num_classes
+        num_negative = num_total - num_positive - msg_pass_src_idxs.size(0)
+        # pos_weight = num_negative / (num_positive + self.eps) if num_positive > 0 else 1.0
+        pos_weight = 1
         
-        # Compute weighted binary cross entropy loss
-        # Only on non-masked entries
-        bce_loss = F.binary_cross_entropy_with_logits(
-            logits[mask],
-            labels[mask],
-            pos_weight=torch.tensor([pos_weight], device=logits.device)
+        neg_likelihood = self.calculate_neg_log_likelihood(
+            Ahat, src_idxs_local, trg_idxs_local, pos_weight,
+            msg_pass_src_idxs, msg_pass_trg_idxs
         )
-        loss = bce_loss
+        loss = neg_likelihood.mean()
         
         # Compute metrics
         with torch.no_grad():
-            # Get predictions from logits
-            predictions = (torch.sigmoid(logits) > 0.5).float()
-            
-            # True positives: correctly predicted positive edges
-            tp = predictions[src_idxs_local, trg_idxs_local].sum().item() if src_idxs_local.numel() > 0 else 0
-            
-            # False negatives: positive edges predicted as negative
+            predictions = (Ahat > 0.5).float()
+            tp = predictions[src_idxs_local, trg_idxs_local].sum().item()
             fn = num_positive - tp
-            
-            # False positives: need to count predictions=1 where labels=0 (excluding masked)
-            # All predictions that are 1, minus true positives, minus any on masked edges
-            fp = predictions[mask].sum().item() - tp
-            
-            # Ensure fp is non-negative
-            fp = max(0, fp)
+            fp = predictions.sum().item() - tp
+            # Subtract false positives from message passing edges
+            if msg_pass_src_idxs.numel() > 0:
+                fp -= predictions[msg_pass_src_idxs, msg_pass_trg_idxs].sum().item()
             
             precision = tp / (tp + fp + self.eps)
-            recall = tp / (tp + fn + self.eps) if num_positive > 0 else 0.0
+            recall = tp / (tp + fn + self.eps)
             f1 = 2 * precision * recall / (precision + recall + self.eps)
         
         metrics = {
@@ -290,7 +275,90 @@ class DownstreamLinkMulticlass(TrainingObjective):
         }
         
         return loss, metrics
+
+
+    # def step_bce(
+    #     self,
+    #     model: torch.nn.Module,  # Not used, kept for interface compatibility
+    #     batch: Any,  # Tuple of (source_embeddings, pos_targets_list, msg_pass_targets_list)
+    #     is_training: bool = True
+    # ) -> Tuple[torch.Tensor, Dict[str, float]]:
+    #     """
+    #     Forward pass and loss computation for multi-label link prediction.
+        
+    #     Args:
+    #         model: Not used (interface compatibility)
+    #         batch: Tuple of (source_embeddings, pos_targets_list, msg_pass_targets_list)
+    #                where pos_targets_list and msg_pass_targets_list are lists of target tensors
+    #         is_training: Whether in training mode
+        
+    #     Returns:
+    #         Tuple of (loss, metrics_dict)
+    #     """
+    #     source_embeddings, pos_targets_list, msg_pass_targets_list = batch
+    #     batch_size = source_embeddings.size(0)
+        
+    #     projected_embeddings = self.decoder(source_embeddings)
+    #     logits = torch.matmul(projected_embeddings, self.target_embeddings.T)  
+
+    #     src_idxs_local, trg_idxs_local = self.create_idxs_local(pos_targets_list)
+    #     msg_pass_src_idxs, msg_pass_trg_idxs = self.create_idxs_local(msg_pass_targets_list)
+        
+    #     # Create dense label tensor: 0 = negative, 1 = positive, -1 = masked (ignore)
+    #     # Initialize all as negatives
+    #     labels = torch.zeros_like(logits)
+        
+    #     if src_idxs_local.numel() > 0:
+    #         labels[src_idxs_local, trg_idxs_local] = 1.0
     
+    #     if msg_pass_src_idxs.numel() > 0:
+    #         labels[msg_pass_src_idxs, msg_pass_trg_idxs] = -1.0
+        
+    #     # Create mask for valid entries (not message passing)
+    #     mask = (labels != -1.0)
+        
+    #     num_positive = src_idxs_local.size(0)
+    #     num_total = mask.sum().item()
+    #     num_negative = num_total - num_positive
+    #     pos_weight = num_negative / (num_positive + self.eps) if num_positive > 0 else 1.0
+        
+    #     # Compute weighted binary cross entropy loss
+    #     # Only on non-masked entries
+    #     bce_loss = F.binary_cross_entropy_with_logits(
+    #         logits[mask],
+    #         labels[mask],
+    #         pos_weight=torch.tensor([pos_weight], device=logits.device)
+    #     )
+    #     loss = bce_loss
+        
+    #     # Compute metrics
+    #     with torch.no_grad():
+    #         # Get predictions from logits
+    #         predictions = (torch.sigmoid(logits) > 0.5).float()
+            
+    #         tp = predictions[src_idxs_local, trg_idxs_local].sum().item() if src_idxs_local.numel() > 0 else 0
+    #         fn = num_positive - tp
+            
+    #         # False positives: need to count predictions=1 where labels=0 (excluding masked)
+    #         # All predictions that are 1, minus true positives, minus any on masked edges
+    #         fp = predictions[mask].sum().item() - tp
+    #         fp = max(0, fp)
+            
+    #         precision = tp / (tp + fp + self.eps)
+    #         recall = tp / (tp + fn + self.eps) if num_positive > 0 else 0.0
+    #         f1 = 2 * precision * recall / (precision + recall + self.eps)
+        
+    #     metrics = {
+    #         "loss": loss.item(),
+    #         "f1": f1,
+    #         "precision": precision,
+    #         "recall": recall,
+    #         "correct": int(tp),
+    #         "total": num_positive
+    #     }
+        
+    #     return loss, metrics
+
     def create_idxs_local(self, targets_list):
         src_idxs_local = torch.cat([
             torch.full((len(indices),), i)
@@ -301,6 +369,41 @@ class DownstreamLinkMulticlass(TrainingObjective):
     
     def get_metric_names(self) -> list:
         return ["loss", "f1", "precision", "recall"]
+
+    def calculate_neg_log_likelihood(
+        self, 
+        Ahat, 
+        src_idxs_local, 
+        trg_idxs_local, 
+        pos_weight,
+        msg_pass_src_idxs,
+        msg_pass_trg_idxs
+    ) -> torch.Tensor:
+        """
+        Calculate negative log-likelihood loss with optional masking of message passing edges.
+        
+        Args:
+            Ahat: Predicted adjacency matrix probabilities [batch_size, num_targets]
+            src_idxs_local: Source indices for positive (supervision) edges
+            trg_idxs_local: Target indices for positive (supervision) edges
+            pos_weight: Weight for positive edges
+            msg_pass_src_idxs: Source indices for message passing edges to mask out (may be empty)
+            msg_pass_trg_idxs: Target indices for message passing edges to mask out (may be empty)
+        
+        Returns:
+            Negative log-likelihood loss tensor [batch_size, num_targets]
+        """
+        Ahat = 1 - Ahat  # assume all edges are negative
+        Ahat[src_idxs_local, trg_idxs_local] = (Ahat[src_idxs_local, trg_idxs_local] - 1) * (-1)  # Invert positive edges
+        neg_likelihood = (-torch.log(Ahat + self.eps))
+        neg_likelihood *= self.neg_weight
+        neg_likelihood[src_idxs_local, trg_idxs_local] *= (pos_weight * (1 / self.neg_weight))
+        
+        # Mask out message passing edges by setting their loss to 0 (if any exist)
+        if msg_pass_src_idxs.numel() > 0:
+            neg_likelihood[msg_pass_src_idxs, msg_pass_trg_idxs] = 0.0
+        
+        return neg_likelihood
 
 
 class SupervisedLinkPrediction(TrainingObjective):
@@ -399,7 +502,7 @@ class SelfSupervisedNodeReconstruction(TrainingObjective):
         Args:
             target_node_type: Node type to reconstruct features for
             mask_ratio: Ratio of features to mask
-            decoder: Optional decoder module (if None, uses linear projection)
+            decoder: Optional MLPClassifier decoder module (if None, uses linear projection)
         """
         super().__init__(target_node_type)
         self.mask_ratio = mask_ratio
@@ -432,11 +535,11 @@ class SelfSupervisedNodeReconstruction(TrainingObjective):
             num_nodes = original_features.size(0)
             node_mask = torch.rand(num_nodes, device=original_features.device) < self.mask_ratio
             # Expand to all features (columnwise masking)
-            # mask = node_mask.unsqueeze(1).expand_as(original_features)
-            # batch.x_dict[self.target_node_type] = original_features.masked_fill(mask, 0.0)
-            # Or random feature masking
-            mask = torch.rand_like(original_features) < self.mask_ratio
+            mask = node_mask.unsqueeze(1).expand_as(original_features)
             batch.x_dict[self.target_node_type] = original_features.masked_fill(mask, 0.0)
+            # Or random feature masking
+            # mask = torch.rand_like(original_features) < self.mask_ratio
+            # batch.x_dict[self.target_node_type] = original_features.masked_fill(mask, 0.0)
         
         # Forward pass through encoder
         out_dict, embeddings_dict = model(batch.x_dict, batch.edge_index_dict)
@@ -775,105 +878,6 @@ class SelfSupervisedTARPFP(TrainingObjective):
     def get_metric_names(self) -> list:
         return ["loss", "loss_tar", "loss_pfp", "mask_ratio", "num_masked_nodes", "acc"]
 
-class EdgeDecoder(torch.nn.Module):
-    """
-    MLP-based edge decoder for link prediction with variable layers and batch normalization.
-    """
-    
-    def __init__(
-        self,
-        hidden_dim: int,
-        num_layers: int = 2,
-        dropout: float = 0.5,
-        use_batchnorm: bool = True
-    ):
-        """
-        Args:
-            hidden_dim: Hidden dimension for MLP layers
-            num_layers: Number of hidden layers
-            dropout: Dropout rate
-            use_batchnorm: Whether to use batch normalization
-        """
-        super().__init__()
-        
-        self.num_layers = num_layers
-        self.use_batchnorm = use_batchnorm
-        self.dropout_rate = dropout
-        
-        # Build MLP layers
-        self.layers = torch.nn.ModuleList()
-        self.batch_norms = torch.nn.ModuleList() if use_batchnorm else None
-        
-        # Input layer (concatenated src + dst embeddings)
-        input_dim = hidden_dim * 2
-        self.layers.append(torch.nn.Linear(input_dim, hidden_dim))
-        if use_batchnorm and self.batch_norms is not None:
-            self.batch_norms.append(torch.nn.BatchNorm1d(hidden_dim))
-        
-        # Hidden layers
-        for _ in range(num_layers - 1):
-            self.layers.append(torch.nn.Linear(hidden_dim, hidden_dim))
-            if use_batchnorm and self.batch_norms is not None:
-                self.batch_norms.append(torch.nn.BatchNorm1d(hidden_dim))
-        
-        # Output layer
-        self.output_layer = torch.nn.Linear(hidden_dim, 1)
-        self.dropout = torch.nn.Dropout(dropout)
-    
-    def forward(self, src_embeddings: torch.Tensor, dst_embeddings: torch.Tensor) -> torch.Tensor:
-        """
-        Decode edge scores from source and destination embeddings.
-        
-        Args:
-            src_embeddings: Source node embeddings [num_edges, hidden_dim]
-            dst_embeddings: Destination node embeddings [num_edges, hidden_dim]
-        
-        Returns:
-            Edge scores [num_edges, 1]
-        """
-        # Concatenate source and destination embeddings
-        x = torch.cat([src_embeddings, dst_embeddings], dim=-1)
-        
-        # Pass through MLP layers
-        for i, layer in enumerate(self.layers):
-            x = layer(x)
-            
-            if self.use_batchnorm and self.batch_norms is not None:
-                x = self.batch_norms[i](x)
-            
-            x = F.relu(x)
-            x = self.dropout(x)
-        
-        # Output layer
-        x = self.output_layer(x)
-        return x
-
-
-class FeatureDecoder(torch.nn.Module):
-    """
-    Simple MLP-based feature decoder for node feature reconstruction.
-    """
-    
-    def __init__(self, hidden_dim: int, feature_dim: int, dropout: float = 0.5):
-        super().__init__()
-        self.decoder = torch.nn.Sequential(
-            torch.nn.Linear(hidden_dim, hidden_dim),
-            torch.nn.ReLU(),
-            torch.nn.Dropout(dropout),
-            torch.nn.Linear(hidden_dim, feature_dim)
-        )
-    
-    def forward(self, embeddings: torch.Tensor) -> torch.Tensor:
-        """
-        Decode features from embeddings.
-        
-        Args:
-            embeddings: Node embeddings [num_nodes, hidden_dim]
-        
-        Returns:
-            Reconstructed features [num_nodes, feature_dim]
-        """
-        return self.decoder(embeddings)
 
 def sce_loss(x, y, alpha=3):
     x = F.normalize(x, p=2, dim=-1)

@@ -12,7 +12,7 @@ from pathlib import Path
 
 from graphssl.utils.data_utils import load_ogb_mag, create_neighbor_loaders, create_link_loaders, get_dataset_info, \
     extract_and_save_embeddings, create_edge_splits, subsample_dataset
-from graphssl.utils.models import create_model
+from graphssl.utils.graphsage import create_model
 from graphssl.utils.training_utils import train_model, test_model, extract_embeddings
 from graphssl.utils.objective_utils import (
     SupervisedNodeClassification,
@@ -20,9 +20,8 @@ from graphssl.utils.objective_utils import (
     SelfSupervisedNodeReconstruction,
     SelfSupervisedEdgeReconstruction,
     SelfSupervisedTARPFP,
-    EdgeDecoder,
-    FeatureDecoder
 )
+from graphssl.utils.models import MLPClassifier, EdgeDecoder
 from graphssl.utils.downstream import (
     run_downstream_evaluation
 )
@@ -190,7 +189,14 @@ def run_pipeline(args):
         # Create optional edge decoder if specified
         decoder = None
         if args.use_edge_decoder:
-            decoder = EdgeDecoder(hidden_dim=args.hidden_channels, dropout=args.dropout).to(device)
+            decoder = EdgeDecoder(
+                input_dim=args.hidden_channels * 2,
+                hidden_dim=args.hidden_channels,
+                output_dim=1,
+                num_layers=2,
+                dropout=args.dropout,
+                use_batchnorm=args.use_batchnorm
+            ).to(device)
             logger.info("Using MLP-based edge decoder")
         objective = SupervisedLinkPrediction(
             target_edge_type=target_edge_type,
@@ -203,10 +209,13 @@ def run_pipeline(args):
         decoder = None
         if args.use_feature_decoder:
             feature_dim = data[args.target_node].x.shape[1]
-            decoder = FeatureDecoder(
+            decoder = MLPClassifier(
+                input_dim=args.hidden_channels,
                 hidden_dim=args.hidden_channels,
-                feature_dim=feature_dim,
-                dropout=args.dropout
+                output_dim=feature_dim,
+                num_layers=2,
+                dropout=args.dropout,
+                use_batchnorm=args.use_batchnorm
             ).to(device)
             logger.info("Using MLP-based feature decoder")
         objective = SelfSupervisedNodeReconstruction(
@@ -223,7 +232,14 @@ def run_pipeline(args):
         # Create optional edge decoder
         decoder = None
         if args.use_edge_decoder:
-            decoder = EdgeDecoder(hidden_dim=args.hidden_channels, dropout=args.dropout).to(device)
+            decoder = EdgeDecoder(
+                input_dim=args.hidden_channels * 2,
+                hidden_dim=args.hidden_channels,
+                output_dim=1,
+                num_layers=2,
+                dropout=args.dropout,
+                use_batchnorm=args.use_batchnorm
+            ).to(device)
             logger.info("Using MLP-based edge decoder")
         objective = SelfSupervisedEdgeReconstruction(
             target_edge_type=target_edge_type,
@@ -236,17 +252,23 @@ def run_pipeline(args):
         attr_dim = data[args.target_node].x.shape[1]
         # optional decoder for TAR and PFP features, if needed
         # NOTE: Move decoders to device to avoid CPU/CUDA tensor mismatch in step()
-        attr_decoder = FeatureDecoder(
+        attr_decoder = MLPClassifier(
+            input_dim=args.hidden_channels,
             hidden_dim=args.hidden_channels,
-            feature_dim=attr_dim,
-            dropout=args.dropout
+            output_dim=attr_dim,
+            num_layers=2,
+            dropout=args.dropout,
+            use_batchnorm=args.use_batchnorm
         ).to(device)
         if args.lambda_pfp > 0:
             pos_dim = data[args.target_node].pos.shape[1]
-            pos_decoder = FeatureDecoder(
+            pos_decoder = MLPClassifier(
+                input_dim=args.hidden_channels,
                 hidden_dim=args.hidden_channels,
-                feature_dim=pos_dim,
-                dropout=args.dropout
+                output_dim=pos_dim,
+                num_layers=2,
+                dropout=args.dropout,
+                use_batchnorm=args.use_batchnorm
             ).to(device)
         else:
             pos_decoder = None

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from graphssl.utils.data_utils import load_ogb_mag, get_dataset_info, create_edge_splits
 from graphssl.utils.downstream import run_downstream_evaluation
-from graphssl.utils.models import create_model
+from graphssl.utils.graphsage import create_model
 from graphssl.utils.args_utils import parse_args
 
 logger = logging.getLogger(__name__)

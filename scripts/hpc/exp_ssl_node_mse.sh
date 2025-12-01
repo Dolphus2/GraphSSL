@@ -61,6 +61,8 @@ python -m graphssl.main \
     --loss_fn mse \
     --target_node "paper" \
     --target_edge_type "paper,has_topic,field_of_study" \
+    --use_feature_decoder \
+    --use_edge_decoder \
     --mask_ratio 0.5 \
     --hidden_channels 128 \
     --num_layers 2 \

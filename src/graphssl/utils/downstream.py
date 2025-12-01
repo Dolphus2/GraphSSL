@@ -10,8 +10,8 @@ from torch.utils.data import TensorDataset, DataLoader, Dataset
 from torch_geometric.loader import NeighborLoader, LinkNeighborLoader
 from graphssl.utils.data_utils import create_edge_splits, create_neighbor_loaders, create_link_loaders, extract_and_save_embeddings, validate_edge_index_for_data, validate_edge_index_for_embeddings, create_index_mapping, remap_edges
 from graphssl.utils.training_utils import extract_embeddings
-from graphssl.utils.objective_utils import DownstreamNodeClassification, DownstreamLinkMulticlass, SupervisedLinkPrediction, EdgeDecoder
-from graphssl.utils.downstream_models import MLPClassifier
+from graphssl.utils.objective_utils import DownstreamNodeClassification, DownstreamLinkMulticlass, SupervisedLinkPrediction
+from graphssl.utils.models import MLPClassifier, EdgeDecoder
 from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 from tqdm import tqdm
@@ -39,6 +39,7 @@ def train_downstream_model(
 ) -> Dict[str, List[float]]:
     """
     Unified training function for downstream tasks using objectives.
+    Validates every 10 steps for early stopping during long epochs.
     
     Args:
         model: The model (encoder or classifier)
@@ -48,7 +49,7 @@ def train_downstream_model(
         optimizer: Optimizer
         device: Device to train on
         num_epochs: Maximum number of epochs
-        early_stopping_patience: Patience for early stopping
+        early_stopping_patience: Patience for early stopping (checked every 100 steps)
         verbose: Whether to print progress
         set_model_train: Whether to call model.train() (False for frozen encoders)
         disable_tqdm: Whether to disable tqdm progress bars
@@ -64,7 +65,13 @@ def train_downstream_model(
     history = {f"train_{name}": [] for name in metric_names}
     history.update({f"val_{name}": [] for name in metric_names})
     
+    global_step = 0
+    early_stop = False
+    
     for epoch in range(num_epochs):
+        if early_stop:
+            break
+            
         # Training
         if set_model_train:
             model.train()
@@ -74,7 +81,7 @@ def train_downstream_model(
         total_metrics['correct'] = 0
         total_metrics['total'] = 0
         
-        for batch in tqdm(train_loader, desc="Training", leave=False, disable=disable_tqdm):
+        for batch in tqdm(train_loader, desc=f"Epoch {epoch+1}", leave=False, disable=disable_tqdm):
             if isinstance(batch, (list, tuple)):
                 batch = tuple(b.to(device) if isinstance(b, torch.Tensor) else b for b in batch)
             else:
@@ -96,54 +103,92 @@ def train_downstream_model(
                     total_metrics[key] += value
                 elif key in total_metrics:
                     total_metrics[key] += value * batch_size
-        
-        # print(f"End of epoch {epoch+1}: train_total={total_metrics['total']}, train_correct={total_metrics['correct']}, train_loss={total_metrics.get('loss', 0.0)}")
-        
-        # Compute epoch averages
-        train_metrics = {}
-        if total_metrics['total'] == 0:
-            logger.warning(f"Epoch {epoch+1}: train_total is 0 - no samples processed in training")
-            for key in metric_names:
-                train_metrics[key] = 0.0
-        else:
-            for key in metric_names:
-                if key in total_metrics:
-                    train_metrics[key] = total_metrics[key] / total_metrics['total']
-            # Add accuracy if we tracked correct/total
-            if 'correct' in total_metrics and total_metrics['total'] > 0:
-                train_metrics['acc'] = total_metrics['correct'] / total_metrics['total']
-        
-        # Validation
-        val_metrics = evaluate_downstream_model(
-            model, objective, val_loader, device, disable_tqdm
-        )
-        
-        # Store history (dynamically add new keys if they appear)
-        for key, value in train_metrics.items():
-            if f"train_{key}" not in history:
-                history[f"train_{key}"] = []
-            history[f"train_{key}"].append(value)
-        for key, value in val_metrics.items():
-            if f"val_{key}" not in history:
-                history[f"val_{key}"] = []
-            history[f"val_{key}"].append(value)
-        
-        # Early stopping (use 'acc' metric if available, otherwise use first metric)
-        val_metric_for_best = val_metrics.get('acc', val_metrics.get(metric_names[0], 0.0))
-        if val_metric_for_best > best_val_metric:
-            best_val_metric = val_metric_for_best
-            patience_counter = 0
-        else:
-            patience_counter += 1
-            if patience_counter >= early_stopping_patience:
+
+            global_step += 1
+            
+            # Validate every 100 steps
+            if global_step % 100 == 0:
+                # Compute current training metrics
+                train_metrics = {}
+                if total_metrics['total'] > 0:
+                    for key in metric_names:
+                        if key in total_metrics:
+                            train_metrics[key] = total_metrics[key] / total_metrics['total']
+                    if 'correct' in total_metrics:
+                        train_metrics['acc'] = total_metrics['correct'] / total_metrics['total']
+                
+                # Validation
+                val_metrics = evaluate_downstream_model(
+                    model, objective, val_loader, device, disable_tqdm
+                )
+                
+                # Store history
+                for key, value in train_metrics.items():
+                    if f"train_{key}" not in history:
+                        history[f"train_{key}"] = []
+                    history[f"train_{key}"].append(value)
+                for key, value in val_metrics.items():
+                    if f"val_{key}" not in history:
+                        history[f"val_{key}"] = []
+                    history[f"val_{key}"].append(value)
+                
+                # Early stopping check
+                val_metric_for_best = val_metrics.get('acc', val_metrics.get(metric_names[0], 0.0))
+                if val_metric_for_best > best_val_metric:
+                    best_val_metric = val_metric_for_best
+                    patience_counter = 0
+                else:
+                    patience_counter += 1
+                    if patience_counter >= early_stopping_patience:
+                        if verbose:
+                            logger.info(f"Early stopping at epoch {epoch+1}, step {global_step}")
+                        early_stop = True
+                        break
+                
                 if verbose:
-                    logger.info(f"Early stopping at epoch {epoch+1}")
-                break
+                    train_str = " | ".join([f"Train {k.capitalize()}: {v:.4f}" for k, v in train_metrics.items()])
+                    val_str = " | ".join([f"Val {k.capitalize()}: {v:.4f}" for k, v in val_metrics.items()])
+                    logger.info(f"Step {global_step} (Epoch {epoch+1}) - {train_str} | {val_str}")
+                
+                # Return to training mode
+                if set_model_train:
+                    model.train()
         
-        if verbose and (epoch + 1) % 10 == 0:
-            train_str = " | ".join([f"Train {k.capitalize()}: {v:.4f}" for k, v in train_metrics.items()])
-            val_str = " | ".join([f"Val {k.capitalize()}: {v:.4f}" for k, v in val_metrics.items()])
-            logger.info(f"Epoch {epoch+1}/{num_epochs} - {train_str} | {val_str}")
+        # End of epoch validation (if not already stopped)
+        if not early_stop:
+            # Compute epoch averages
+            train_metrics = {}
+            if total_metrics['total'] == 0:
+                logger.warning(f"Epoch {epoch+1}: train_total is 0 - no samples processed in training")
+                for key in metric_names:
+                    train_metrics[key] = 0.0
+            else:
+                for key in metric_names:
+                    if key in total_metrics:
+                        train_metrics[key] = total_metrics[key] / total_metrics['total']
+                # Add accuracy if we tracked correct/total
+                if 'correct' in total_metrics and total_metrics['total'] > 0:
+                    train_metrics['acc'] = total_metrics['correct'] / total_metrics['total']
+            
+            # Final epoch validation
+            val_metrics = evaluate_downstream_model(
+                model, objective, val_loader, device, disable_tqdm
+            )
+            
+            # Store history
+            for key, value in train_metrics.items():
+                if f"train_{key}" not in history:
+                    history[f"train_{key}"] = []
+                history[f"train_{key}"].append(value)
+            for key, value in val_metrics.items():
+                if f"val_{key}" not in history:
+                    history[f"val_{key}"] = []
+                history[f"val_{key}"].append(value)
+            
+            if verbose:
+                train_str = " | ".join([f"Train {k.capitalize()}: {v:.4f}" for k, v in train_metrics.items()])
+                val_str = " | ".join([f"Val {k.capitalize()}: {v:.4f}" for k, v in val_metrics.items()])
+                logger.info(f"Epoch {epoch+1}/{num_epochs} complete - {train_str} | {val_str}")
     
     return history
 
@@ -542,7 +587,14 @@ def evaluate_link_prediction(
             logger.info(f"\nRun {run+1}/{n_runs}")
         
         # Create decoder for this run
-        decoder = EdgeDecoder(hidden_dim=hidden_dim, dropout=dropout).to(device)
+        decoder = EdgeDecoder(
+            input_dim=hidden_dim * 2,
+            hidden_dim=hidden_dim,
+            output_dim=1,
+            num_layers=2,
+            dropout=dropout,
+            use_batchnorm=True
+        ).to(device)
         
         # Create objective with decoder
         objective = SupervisedLinkPrediction(
@@ -855,16 +907,27 @@ def evaluate_link_prediction_multiclass(
             use_batchnorm=True
         ).to(device)
         
+        # Create matching target decoder
+        target_decoder = MLPClassifier(
+            input_dim=train_embeddings.shape[1],
+            hidden_dim=hidden_dim,
+            output_dim=train_embeddings.shape[1],  # Project to same dimension
+            num_layers=num_layers,
+            dropout=dropout,
+            use_batchnorm=True
+        ).to(device)
+        
         # Create objective
         objective = DownstreamLinkMulticlass(
             decoder=decoder,
             target_embeddings=target_embeddings,
-            device=device
+            device=device,
+            target_decoder=target_decoder
         )
         
         # Create optimizer
         optimizer = torch.optim.Adam(
-            decoder.parameters(),
+            list(decoder.parameters()) + list(target_decoder.parameters()),
             lr=lr,
             weight_decay=weight_decay
         )

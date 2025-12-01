@@ -7,7 +7,7 @@ import torch
 from pathlib import Path
 
 from graphssl.utils.data_utils import load_ogb_mag, create_neighbor_loaders, get_dataset_info
-from graphssl.utils.models import create_model, HeteroGraphSAGE
+from graphssl.utils.graphsage import create_model, HeteroGraphSAGE
 from graphssl.utils.training_utils import train_epoch, evaluate, train_model
 
 print("Testing GraphSSL Pipeline Components")
