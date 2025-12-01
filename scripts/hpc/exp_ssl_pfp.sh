@@ -56,7 +56,7 @@ echo ""
 # Run experiment
 python -m graphssl.main \
     --data_root data \
-    --metapath2vec_embeddings_path embedding.pt \
+    --metapath2vec_embeddings_path pos_embedding.pt \
     --results_root results/exp_ssl_pfp_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
     --objective_type self_supervised_tarpfp \
     --target_node "paper" \
