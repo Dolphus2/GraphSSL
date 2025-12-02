@@ -4,6 +4,8 @@ This guide covers setting up and running GraphSSL on the DTU High Performance Co
 
 ## Prerequisites
 
+Begin by following this guide to log on to the DTU HPC: https://www.hpc.dtu.dk/?page_id=4317
+
 ### Check Available Space
 
 Before starting, ensure you have enough storage space:
