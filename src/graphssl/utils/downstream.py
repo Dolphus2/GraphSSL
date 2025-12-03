@@ -1308,7 +1308,7 @@ def run_downstream_evaluation(
             test_data=test_data,
             train_embeddings=train_embeddings,
             train_edge_index=train_edge_index_remapped,
-            train_msg_passing_edges=val_msg_passing_edges_remapped,
+            train_msg_passing_edges=train_msg_passing_edges_remapped,
             val_embeddings=val_embeddings,
             val_edge_index=val_edge_index_remapped,
             val_msg_passing_edges=val_msg_passing_edges_remapped,
