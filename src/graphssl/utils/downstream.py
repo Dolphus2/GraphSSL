@@ -859,6 +859,13 @@ def evaluate_link_prediction_multiclass(
                 # Build index pointers of length (num_nodes + 1)
                 num_nodes = embeddings.size(0)
                 counts = torch.bincount(src, minlength=num_nodes)
+                
+                # Ensure counts is exactly num_nodes long (pad or truncate if needed)
+                if counts.size(0) < num_nodes:
+                    counts = torch.cat([counts, torch.zeros(num_nodes - counts.size(0), dtype=torch.long)])
+                elif counts.size(0) > num_nodes:
+                    counts = counts[:num_nodes]
+                
                 ptr = torch.zeros(num_nodes + 1, dtype=torch.long)
                 ptr[1:] = torch.cumsum(counts, dim=0)
 
