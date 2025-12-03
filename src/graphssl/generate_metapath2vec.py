@@ -26,6 +26,120 @@ def save_embedding(model, node_type: str = "paper", out_path: str = "embedding.p
     print(f"Saved {node_type} embeddings to {out_path}")
 
 
+def generate_embeddings(
+    data,
+    device: torch.device,
+    out_path: str,
+    node_type: str = "paper",
+    embedding_dim: int = 128,
+    walk_length: int = 64,
+    context_size: int = 7,
+    walks_per_node: int = 5,
+    num_negative_samples: int = 5,
+    batch_size: int = 128,
+    lr: float = 0.01,
+    epochs: int = 5,
+    log_steps: int = 100,
+    logger = None
+):
+    """
+    Generate and save MetaPath2Vec embeddings for a given node type.
+    
+    Args:
+        data: HeteroData object with edge_index_dict
+        device: Device to use for training
+        out_path: Path to save the embeddings
+        node_type: Node type to generate embeddings for
+        embedding_dim: Dimension of embeddings
+        walk_length: Length of random walks
+        context_size: Context window size
+        walks_per_node: Number of walks per node
+        num_negative_samples: Number of negative samples
+        batch_size: Batch size for training
+        lr: Learning rate
+        epochs: Number of training epochs
+        log_steps: Log every N steps
+        logger: Optional logger for progress messages
+    """
+    if logger:
+        logger.info("Creating MetaPath2Vec model...")
+    else:
+        print("Creating MetaPath2Vec model...")
+    
+    # Define metapath
+    metapath = [
+        ('paper', 'has_topic', 'field_of_study'),
+        ('field_of_study', 'rev_has_topic', 'paper'),
+        ('paper', 'rev_writes', 'author'),
+        ('author', 'writes', 'paper'),
+    ]
+    
+    # Create MetaPath2Vec model
+    model = MetaPath2Vec(
+        edge_index_dict=data.edge_index_dict,
+        embedding_dim=embedding_dim,
+        metapath=metapath,
+        walk_length=walk_length,
+        context_size=context_size,
+        walks_per_node=walks_per_node,
+        num_negative_samples=num_negative_samples,
+        sparse=True,
+    ).to(device)
+    
+    # Create data loader
+    loader = model.loader(
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=4,
+    )
+    
+    # Setup optimizer
+    optimizer = torch.optim.SparseAdam(list(model.parameters()), lr=lr)
+    model.train()
+    
+    if logger:
+        logger.info(f"Training MetaPath2Vec ({epochs} epochs)...")
+    else:
+        print(f"Training MetaPath2Vec ({epochs} epochs)...")
+    
+    # Training loop
+    for epoch in range(1, epochs + 1):
+        total_loss = 0.0
+        for i, (pos_rw, neg_rw) in enumerate(loader):
+            pos_rw = pos_rw.to(device)
+            neg_rw = neg_rw.to(device)
+            
+            optimizer.zero_grad()
+            loss = model.loss(pos_rw, neg_rw)
+            loss.backward()
+            optimizer.step()
+            
+            total_loss += float(loss.item())
+            
+            if (i + 1) % log_steps == 0:
+                msg = f"Epoch {epoch}, Step {i+1}/{len(loader)}, Loss: {loss:.4f}"
+                if logger:
+                    logger.info(msg)
+                else:
+                    print(msg)
+        
+        avg_loss = total_loss / len(loader)
+        msg = f"Epoch {epoch} completed, avg loss: {avg_loss:.4f}"
+        if logger:
+            logger.info(msg)
+        else:
+            print(msg)
+    
+    # Save embeddings
+    save_embedding(model, node_type=node_type, out_path=out_path)
+    
+    msg = f"Positional embeddings generated and saved to {out_path}"
+    if logger:
+        logger.info(msg)
+    else:
+        print(msg)
+
+
 def main():
     parser = argparse.ArgumentParser(description="OGBN-MAG (MetaPath2Vec)")
     parser.add_argument("--root", type=str, default="data",

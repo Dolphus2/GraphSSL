@@ -49,7 +49,6 @@ python -m graphssl.main \
     --downstream_batch_size 1024 \
     --edge_msg_pass_prop 0.5 0.5 0.5 \
     --seed 42 \
-    --test_mode
 
 if [ $? -eq 0 ]; then
     echo "✓ Test 1 passed"

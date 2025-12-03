@@ -26,6 +26,7 @@ from graphssl.utils.downstream import (
     run_downstream_evaluation
 )
 from graphssl.utils.args_utils import parse_args, setup_logging_and_wandb
+from graphssl.generate_metapath2vec import generate_embeddings
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,32 @@ def run_pipeline(args):
     if args.objective_type == "self_supervised_tarpfp" and args.lambda_pfp > 0:
         # Load metapath2vec embeddings
         metapath2vec_embeddings_path = data_path / "embeddings" / args.metapath2vec_embeddings_path
+        
+        # Generate embeddings if they don't exist
+        if not metapath2vec_embeddings_path.exists():
+            logger.warning(f"Positional embeddings not found at {metapath2vec_embeddings_path}")
+            logger.info("Generating positional embeddings using MetaPath2Vec...")
+            
+            # Generate embeddings using consolidated function
+            metapath2vec_embeddings_path.parent.mkdir(parents=True, exist_ok=True)
+            generate_embeddings(
+                data=data,
+                device=device,
+                out_path=str(metapath2vec_embeddings_path),
+                node_type="paper",
+                embedding_dim=args.hidden_channels,  # Use same dim as model
+                walk_length=64,
+                context_size=7,
+                walks_per_node=5,
+                num_negative_samples=5,
+                batch_size=128,
+                lr=0.01,
+                epochs=5,
+                log_steps=100,
+                logger=logger
+            )
+        
+        # Load the embeddings
         paper_pos = torch.load(metapath2vec_embeddings_path, map_location=device).detach().clone()
         paper_pos.requires_grad = False
 

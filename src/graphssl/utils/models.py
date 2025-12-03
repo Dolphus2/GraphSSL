@@ -54,6 +54,21 @@ class MLPClassifier(nn.Module):
         self.output_layer = nn.Linear(hidden_dim, output_dim)
         self.dropout = nn.Dropout(dropout)
     
+    def reset_parameters(self):
+        """
+        Reset parameters of all layers.
+        This method is called by PyTorch Geometric when duplicating modules.
+        """
+        for layer in self.layers:
+            if hasattr(layer, 'reset_parameters'):
+                layer.reset_parameters()
+        if self.output_layer is not None and hasattr(self.output_layer, 'reset_parameters'):
+            self.output_layer.reset_parameters()
+        if self.batch_norms is not None:
+            for bn in self.batch_norms:
+                if hasattr(bn, 'reset_parameters'):
+                    bn.reset_parameters()
+    
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass through MLP.
