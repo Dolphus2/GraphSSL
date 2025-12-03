@@ -23,14 +23,13 @@ python -m graphssl.main  \
     --hidden_channels 128 \
     --downstream_lr 0.001 \
     --downstream_patience 5 \
-    --downstream_task both \
+    --downstream_task multiclass_link \
     --downstream_n_runs 2 \
     --downstream_hidden_dim 128 \
     --downstream_num_layers 2 \
     --downstream_node_epochs 100 \
     --downstream_link_epochs 5 \
     --edge_msg_pass_prop 0.8 0.8 0.8 \
-    --test_mode
 
 echo ""
 echo "=========================================="

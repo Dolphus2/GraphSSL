@@ -2,11 +2,11 @@
 #BSUB -J gssl_ssl_tarpfp
 #BSUB -o logs/exp_ssl_tarpfp_%J.out
 #BSUB -e logs/exp_ssl_tarpfp_%J.err
-#BSUB -q gpuv100
+#BSUB -q gpua10
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -n 4
 #BSUB -R "span[hosts=1]"
-#BSUB -R "rusage[mem=8GB]"
+#BSUB -R "rusage[mem=4GB]"
 #BSUB -W 24:00 
 #BSUB -B 
 #BSUB -N 
@@ -86,6 +86,7 @@ python -m graphssl.main \
     --downstream_hidden_dim 128 \
     --downstream_num_layers 2 \
     --downstream_dropout 0.5 \
+    --multiclass_batch_size 256 \
     --downstream_node_epochs 100 \
     --downstream_link_epochs 3 \
     --downstream_patience 20 \

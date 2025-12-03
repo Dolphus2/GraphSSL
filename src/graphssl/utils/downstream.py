@@ -405,8 +405,8 @@ def evaluate_node_property_prediction(
         test_accuracies.append(test_acc)
         test_losses.append(test_loss)
         
-        if verbose:
-            logger.info(f"Run {run+1} - Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}, Precision: {test_precision:.4f}, Recall: {test_recall:.4f}")
+        #if verbose:
+        logger.info(f"Run {run+1} - Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}, Precision: {test_precision:.4f}, Recall: {test_recall:.4f}")
         
         # Log to wandb (including training history)
         wandb.log({
@@ -650,8 +650,8 @@ def evaluate_link_prediction(
         test_accuracies.append(test_acc)
         test_losses.append(test_loss)
         
-        if verbose:
-            logger.info(f"Run {run+1} - Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}, Precision: {test_precision:.4f}, Recall: {test_recall:.4f}")
+        #if verbose:
+        logger.info(f"Run {run+1} - Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}, Precision: {test_precision:.4f}, Recall: {test_recall:.4f}")
         
         # Log to wandb (including training history)
         wandb.log({
@@ -1024,8 +1024,8 @@ def evaluate_link_prediction_multiclass(
         test_accuracies.append(test_accuracy)
         confusion_matrices.append(cm)
         
-        if verbose:
-            logger.info(f"Run {run+1} - Test Loss: {test_loss:.4f}, Test F1: {test_f1:.4f}, Accuracy: {test_accuracy:.4f}, Precision: {test_precision:.4f}, Recall: {test_recall:.4f}, TopK Precision: {test_topk_precision:.4f}, TopK Recall: {test_topk_recall:.4f}")
+        # if verbose:
+        logger.info(f"Run {run+1} - Test Loss: {test_loss:.4f}, Test F1: {test_f1:.4f}, Accuracy: {test_accuracy:.4f}, Precision: {test_precision:.4f}, Recall: {test_recall:.4f}, TopK Precision: {test_topk_precision:.4f}, TopK Recall: {test_topk_recall:.4f}")
         
         # Log to wandb (including training history)
         wandb.log({
@@ -1281,7 +1281,7 @@ def run_downstream_evaluation(
             weight_decay=args.downstream_weight_decay,
             num_epochs=args.downstream_node_epochs,
             early_stopping_patience=args.downstream_patience,
-            verbose=True,
+            verbose=False,
             disable_tqdm=args.disable_tqdm
         )
 
@@ -1322,13 +1322,13 @@ def run_downstream_evaluation(
             hidden_dim=args.downstream_hidden_dim,
             num_layers=args.downstream_num_layers,
             dropout=args.downstream_dropout,
-            batch_size=args.downstream_batch_size,
+            batch_size=args.multiclass_batch_size,
             lr=args.downstream_lr,
             weight_decay=args.downstream_weight_decay,
             num_epochs=args.downstream_node_epochs,
             early_stopping_patience=args.downstream_patience,
             num_workers=args.num_workers,
-            verbose=True,
+            verbose=False,
             disable_tqdm=args.disable_tqdm
         )
         

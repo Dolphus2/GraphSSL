@@ -342,6 +342,12 @@ def parse_args():
         help="Batch size for downstream classifier training"
     )
     parser.add_argument(
+        "--multiclass_batch_size",
+        type=int,
+        default=256,
+        help="Batch size for memory-intensive multiclass link prediction (should be smaller than downstream_batch_size)"
+    )
+    parser.add_argument(
         "--downstream_lr",
         type=float,
         default=0.001,
