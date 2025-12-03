@@ -62,9 +62,8 @@ python -m graphssl.main \
     --target_edge_type "paper,has_topic,field_of_study" \
     --use_feature_decoder \
     --use_edge_decoder \
-    --mer_weight 0.0 \
-    --tar_weight 1.0 \
-    --pfp_weight 1.0 \
+    --lambda_tar 1.0 \
+    --lambda_pfp 0.0 \
     --mask_ratio 0.5 \
     --neg_sampling_ratio 1.0 \
     --tar_temperature 0.5 \

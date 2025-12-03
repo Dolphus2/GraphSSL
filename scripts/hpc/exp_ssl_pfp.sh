@@ -56,15 +56,15 @@ echo ""
 # Run experiment
 python -m graphssl.main \
     --data_root data \
+    --metapath2vec_embeddings_path pos_embedding.pt \
     --results_root results/exp_ssl_pfp_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
     --objective_type self_supervised_tarpfp \
     --target_node "paper" \
     --target_edge_type "paper,has_topic,field_of_study" \
     --use_feature_decoder \
     --use_edge_decoder \
-    --mer_weight 0.0 \
-    --tar_weight 1.0 \
-    --pfp_weight 1.0 \
+    --lambda_tar 0.0 \
+    --lambda_pfp 1.0 \
     --mask_ratio 0.5 \
     --neg_sampling_ratio 1.0 \
     --tar_temperature 0.5 \
