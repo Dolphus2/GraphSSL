@@ -347,7 +347,6 @@ def run_pipeline(args):
         early_stopping_patience=args.patience,
         checkpoint_dir=str(checkpoint_dir),
         verbose=True,
-        metric_for_best=args.metric_for_best,
         disable_tqdm=args.disable_tqdm
     )
     

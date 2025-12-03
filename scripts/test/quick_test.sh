@@ -31,23 +31,25 @@ python -m graphssl.main \
     --target_edge_type "paper,has_topic,field_of_study" \
     --use_feature_decoder \
     --use_edge_decoder \
-    --hidden_channels 64 \
+    --hidden_channels 128 \
     --num_layers 2 \
     --num_neighbors 10 10 \
-    --batch_size 256 \
+    --batch_size 1024 \
     --epochs 2 \
     --lr 0.001 \
     --patience 5 \
     --num_workers 0 \
     --downstream_eval \
-    --downstream_task node \
+    --downstream_task both \
     --downstream_n_runs 1 \
-    --downstream_hidden_dim 64 \
+    --downstream_hidden_dim 128 \
     --downstream_num_layers 1 \
     --downstream_node_epochs 2 \
-    --downstream_batch_size 256 \
+    --downstream_link_epochs 1 \
+    --downstream_batch_size 1024 \
     --edge_msg_pass_prop 0.5 0.5 0.5 \
-    --seed 42
+    --seed 42 \
+    --test_mode
 
 if [ $? -eq 0 ]; then
     echo "✓ Test 1 passed"
@@ -65,10 +67,10 @@ python -m graphssl.main \
     --results_root results/quick_tests/test2_sup_link \
     --objective_type supervised_link_prediction \
     --target_node "paper" \
-    --target_edge_type "paper,cites,paper" \
+    --target_edge_type "paper,has_topic,field_of_study" \
     --use_feature_decoder \
     --use_edge_decoder \
-    --hidden_channels 64 \
+    --hidden_channels 128 \
     --num_layers 2 \
     --num_neighbors 10 10 \
     --batch_size 256 \
@@ -80,7 +82,7 @@ python -m graphssl.main \
     --downstream_eval \
     --downstream_task link \
     --downstream_n_runs 1 \
-    --downstream_hidden_dim 64 \
+    --downstream_hidden_dim 128 \
     --downstream_num_layers 1 \
     --downstream_link_epochs 2 \
     --downstream_batch_size 256 \
@@ -108,7 +110,7 @@ python -m graphssl.main \
     --use_feature_decoder \
     --use_edge_decoder \
     --mask_ratio 0.5 \
-    --hidden_channels 64 \
+    --hidden_channels 128 \
     --num_layers 2 \
     --num_neighbors 10 10 \
     --batch_size 256 \
@@ -119,7 +121,7 @@ python -m graphssl.main \
     --downstream_eval \
     --downstream_task node \
     --downstream_n_runs 1 \
-    --downstream_hidden_dim 64 \
+    --downstream_hidden_dim 128 \
     --downstream_num_layers 1 \
     --downstream_node_epochs 2 \
     --downstream_batch_size 256 \
@@ -143,11 +145,11 @@ python -m graphssl.main \
     --objective_type self_supervised_edge \
     --loss_fn bce \
     --target_node "paper" \
-    --target_edge_type "paper,cites,paper" \
+    --target_edge_type "paper,has_topic,field_of_study" \
     --use_feature_decoder \
     --use_edge_decoder \
     --neg_sampling_ratio 1.0 \
-    --hidden_channels 64 \
+    --hidden_channels 128 \
     --num_layers 2 \
     --num_neighbors 10 10 \
     --batch_size 256 \
@@ -158,7 +160,7 @@ python -m graphssl.main \
     --downstream_eval \
     --downstream_task link \
     --downstream_n_runs 1 \
-    --downstream_hidden_dim 64 \
+    --downstream_hidden_dim 128 \
     --downstream_num_layers 1 \
     --downstream_link_epochs 2 \
     --downstream_batch_size 256 \
@@ -190,7 +192,7 @@ python -m graphssl.main \
     --mask_ratio 0.5 \
     --neg_sampling_ratio 1.0 \
     --tar_temperature 0.5 \
-    --hidden_channels 64 \
+    --hidden_channels 128 \
     --num_layers 2 \
     --num_neighbors 10 10 \
     --batch_size 256 \
@@ -201,13 +203,13 @@ python -m graphssl.main \
     --downstream_eval \
     --downstream_task both \
     --downstream_n_runs 1 \
-    --downstream_hidden_dim 64 \
+    --downstream_hidden_dim 128 \
     --downstream_num_layers 1 \
     --downstream_node_epochs 2 \
     --downstream_link_epochs 2 \
     --downstream_batch_size 256 \
     --edge_msg_pass_prop 0.5 0.5 0.5 \
-    --seed 42
+    --seed 42 
 
 if [ $? -eq 0 ]; then
     echo "✓ Test 5 passed"

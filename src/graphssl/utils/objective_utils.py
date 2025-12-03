@@ -184,7 +184,8 @@ class DownstreamLinkMulticlass(TrainingObjective):
         decoder: torch.nn.Module,
         target_embeddings: torch.Tensor,
         device: torch.device,
-        target_decoder: Optional[torch.nn.Module] = None
+        target_decoder: Optional[torch.nn.Module] = None,
+        topk: int = 20
     ):
         """
         Args:
@@ -192,6 +193,7 @@ class DownstreamLinkMulticlass(TrainingObjective):
             target_embeddings: All target node embeddings [num_targets, hidden_dim]
             device: Device for computation
             target_decoder: Optional MLP to project target embeddings (should match decoder architecture)
+            topk: Number of top predictions to evaluate for top-K accuracy
         """
         super().__init__(target_node_type="embeddings")
         self.decoder = decoder
@@ -202,6 +204,7 @@ class DownstreamLinkMulticlass(TrainingObjective):
         self.eps = 1e-10
         self.neg_weight = 1.0
         self.gamma = 3
+        self.topk = topk
         
     
     def step(
@@ -265,12 +268,35 @@ class DownstreamLinkMulticlass(TrainingObjective):
             precision = tp / (tp + fp + self.eps)
             recall = tp / (tp + fn + self.eps)
             f1 = 2 * precision * recall / (precision + recall + self.eps)
+            
+            # Compute top-K accuracy: for each sample, check if true positives are in top-K predictions
+            topk_values, topk_indices = torch.topk(Ahat, k=min(self.topk, Ahat.size(1)), dim=1)
+            
+            topk_is_positive = topk_values > 0.5  # [batch_size, k]
+            num_predicted_positive = topk_is_positive.sum().item()
+            
+            # Count how many true positives are in the top-K predictions
+            # Ensure all tensors are on the same device
+            src_idxs_local_device = src_idxs_local.to(Ahat.device)
+            trg_idxs_local_device = trg_idxs_local.to(Ahat.device)
+            
+            topk_indices_for_sources = topk_indices[src_idxs_local_device]  # [num_positive, k]
+            topk_is_positive_for_sources = topk_is_positive[src_idxs_local_device]  # [num_positive, k]
+            true_targets_expanded = trg_idxs_local_device.unsqueeze(1)  # [num_positive, 1]
+            is_match = (topk_indices_for_sources == true_targets_expanded)  # [num_positive, k]
+            is_in_topk_and_positive = (is_match & topk_is_positive_for_sources).any(dim=1)  # [num_positive]
+            topk_correct = is_in_topk_and_positive.sum().item()
+            
+            topk_precision = topk_correct / (num_predicted_positive + self.eps)  # Out of predicted positive in top-K
+            topk_recall = topk_correct / (num_positive + self.eps)  # Out of all true positives
         
         metrics = {
             "loss": loss.item(),
             "f1": f1,
             "precision": precision,
             "recall": recall,
+            "topk_precision": topk_precision,
+            "topk_recall": topk_recall,
             "correct": int(tp),
             "total": num_positive
         }
@@ -369,7 +395,7 @@ class DownstreamLinkMulticlass(TrainingObjective):
         return src_idxs_local, trg_idxs_local
     
     def get_metric_names(self) -> list:
-        return ["loss", "f1", "precision", "recall"]
+        return ["loss", "f1", "precision", "recall", "topk_precision", "topk_recall"]
 
     def calculate_neg_log_likelihood(
         self, 

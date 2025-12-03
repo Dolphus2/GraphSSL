@@ -132,12 +132,6 @@ def parse_args():
         action="store_true",
         help="Use MLP-based feature decoder for node reconstruction"
     )
-    parser.add_argument(
-        "--metric_for_best",
-        type=str,
-        default="acc",
-        help="Metric to use for selecting best model (e.g., 'acc', 'loss')"
-    )
     
     # Model arguments
     parser.add_argument(
@@ -439,7 +433,6 @@ def setup_logging_and_wandb(args):
             "neg_sampling_ratio": args.neg_sampling_ratio,
             "use_edge_decoder": args.use_edge_decoder,
             "use_feature_decoder": args.use_feature_decoder,
-            "metric_for_best": args.metric_for_best,
             "loss_fn": args.loss_fn,
             "lambda_tar": args.lambda_tar,
             "lambda_pfp": args.lambda_pfp,

@@ -35,11 +35,12 @@ def train_downstream_model(
     early_stopping_patience: int = 10,
     verbose: bool = False,
     set_model_train: bool = True,
-    disable_tqdm: bool = False
+    disable_tqdm: bool = False,
+    val_after_n_steps: Optional[int] = None
 ) -> Dict[str, List[float]]:
     """
     Unified training function for downstream tasks using objectives.
-    Validates every 10 steps for early stopping during long epochs.
+    Validates periodically for early stopping.
     
     Args:
         model: The model (encoder or classifier)
@@ -49,10 +50,11 @@ def train_downstream_model(
         optimizer: Optimizer
         device: Device to train on
         num_epochs: Maximum number of epochs
-        early_stopping_patience: Patience for early stopping (checked every 100 steps)
+        early_stopping_patience: Patience for early stopping (checked periodically)
         verbose: Whether to print progress
         set_model_train: Whether to call model.train() (False for frozen encoders)
         disable_tqdm: Whether to disable tqdm progress bars
+        val_after_n_steps: Number of steps between validations (default: None = full epoch)
     
     Returns:
         Dictionary containing training history
@@ -64,6 +66,10 @@ def train_downstream_model(
     metric_names = objective.get_metric_names()
     history = {f"train_{name}": [] for name in metric_names}
     history.update({f"val_{name}": [] for name in metric_names})
+    
+    # Set validation frequency: default to full epoch
+    if val_after_n_steps is None or val_after_n_steps > len(train_loader):
+        val_after_n_steps = len(train_loader)
     
     global_step = 0
     early_stop = False
@@ -106,8 +112,8 @@ def train_downstream_model(
 
             global_step += 1
             
-            # Validate every 100 steps
-            if global_step % 100 == 0:
+            # Validate periodically
+            if global_step % val_after_n_steps == 0:
                 # Compute current training metrics
                 train_metrics = {}
                 if total_metrics['total'] > 0:
@@ -133,7 +139,10 @@ def train_downstream_model(
                     history[f"val_{key}"].append(value)
                 
                 # Early stopping check
-                val_metric_for_best = val_metrics.get('acc', val_metrics.get(metric_names[0], 0.0))
+                # Use the primary performance metric for each objective type:
+                # - acc for node classification and supervised link prediction
+                # - f1 for downstream link multiclass prediction
+                val_metric_for_best = val_metrics.get('acc', val_metrics.get('f1', 0.0))
                 if val_metric_for_best > best_val_metric:
                     best_val_metric = val_metric_for_best
                     patience_counter = 0
@@ -148,7 +157,7 @@ def train_downstream_model(
                 if verbose:
                     train_str = " | ".join([f"Train {k.capitalize()}: {v:.4f}" for k, v in train_metrics.items()])
                     val_str = " | ".join([f"Val {k.capitalize()}: {v:.4f}" for k, v in val_metrics.items()])
-                    logger.info(f"Step {global_step} (Epoch {epoch+1}) - {train_str} | {val_str}")
+                    logger.info(f"Epoch {epoch+1}/{num_epochs} - {train_str} | {val_str}")
                 
                 # Return to training mode
                 if set_model_train:
@@ -446,7 +455,8 @@ def train_downstream_link_predictor(
     num_epochs: int = 100,
     early_stopping_patience: int = 10,
     verbose: bool = False,
-    disable_tqdm: bool = False
+    disable_tqdm: bool = False,
+    val_after_n_steps: Optional[int] = None
 ) -> Dict[str, List[float]]:
     """
     Train a link prediction decoder with frozen encoder.
@@ -463,6 +473,7 @@ def train_downstream_link_predictor(
         num_epochs: Maximum number of epochs
         early_stopping_patience: Patience for early stopping
         verbose: Whether to print progress
+        val_after_n_steps: Number of steps between validations (default: None = full epoch)
     
     Returns:
         Dictionary containing training history
@@ -490,7 +501,8 @@ def train_downstream_link_predictor(
         early_stopping_patience=early_stopping_patience,
         verbose=verbose,
         set_model_train=False,  # Keep encoder in eval mode
-        disable_tqdm=disable_tqdm
+        disable_tqdm=disable_tqdm,
+        val_after_n_steps=val_after_n_steps
     )
 
 
@@ -621,7 +633,8 @@ def evaluate_link_prediction(
             num_epochs=num_epochs,
             early_stopping_patience=early_stopping_patience,
             verbose=verbose,
-            disable_tqdm=disable_tqdm
+            disable_tqdm=disable_tqdm,
+            val_after_n_steps=500
         )
         
         # Evaluate on test set
@@ -890,6 +903,8 @@ def evaluate_link_prediction_multiclass(
     test_losses = []
     test_precisions = []
     test_recalls = []
+    test_topk_precisions = []
+    test_topk_recalls = []
     test_accuracies = []
     confusion_matrices = []
     
@@ -901,7 +916,7 @@ def evaluate_link_prediction_multiclass(
         decoder = MLPClassifier(
             input_dim=train_embeddings.shape[1],
             hidden_dim=hidden_dim,
-            output_dim=train_embeddings.shape[1],  # Project to same dimension
+            output_dim=hidden_dim,  # Project to downstream hidden dimension
             num_layers=num_layers,
             dropout=dropout,
             use_batchnorm=True
@@ -911,7 +926,7 @@ def evaluate_link_prediction_multiclass(
         target_decoder = MLPClassifier(
             input_dim=train_embeddings.shape[1],
             hidden_dim=hidden_dim,
-            output_dim=train_embeddings.shape[1],  # Project to same dimension
+            output_dim=hidden_dim,  # Project to downstream hidden dimension
             num_layers=num_layers,
             dropout=dropout,
             use_batchnorm=True
@@ -951,24 +966,35 @@ def evaluate_link_prediction_multiclass(
             decoder, objective, test_loader, device, disable_tqdm
         )
         
-        # Extract metrics (acc is actually F1 in this case for multiclass)
-        test_f1 = test_metrics.get('acc', 0.0)
+        # Extract metrics - DownstreamLinkMulticlass returns f1, precision, recall directly
+        test_f1 = test_metrics.get('f1', 0.0)
         test_loss = test_metrics.get('loss', 0.0)
         test_precision = test_metrics.get('precision', 0.0)
         test_recall = test_metrics.get('recall', 0.0)
+        test_topk_precision = test_metrics.get('topk_precision', 0.0)
+        test_topk_recall = test_metrics.get('topk_recall', 0.0)
         
         # Compute confusion matrix and accuracy for this run
         all_preds = []
         all_labels = []
         decoder.eval()
+        target_decoder.eval()
+        # Move target embeddings to device and apply target decoder if used
+        target_embeddings_device = target_embeddings.to(device)
         with torch.no_grad():
+            # Project target embeddings if target_decoder is provided
+            if target_decoder is not None:
+                projected_target_embeddings = target_decoder(target_embeddings_device)
+            else:
+                projected_target_embeddings = target_embeddings_device
+                
             for batch in test_loader:
                 source_embeddings, pos_targets_list, msg_pass_targets_list = batch
                 source_embeddings = source_embeddings.to(device)
                 
                 # Forward pass
                 projected_embeddings = decoder(source_embeddings)
-                logits = torch.matmul(projected_embeddings, target_embeddings.T)
+                logits = torch.matmul(projected_embeddings, projected_target_embeddings.T)
                 predictions = (torch.sigmoid(logits) > 0.5).cpu().numpy()
                 
                 # Create labels
@@ -993,11 +1019,13 @@ def evaluate_link_prediction_multiclass(
         test_losses.append(test_loss)
         test_precisions.append(test_precision)
         test_recalls.append(test_recall)
+        test_topk_precisions.append(test_topk_precision)
+        test_topk_recalls.append(test_topk_recall)
         test_accuracies.append(test_accuracy)
         confusion_matrices.append(cm)
         
         if verbose:
-            logger.info(f"Run {run+1} - Test Loss: {test_loss:.4f}, Test F1: {test_f1:.4f}, Accuracy: {test_accuracy:.4f}, Precision: {test_precision:.4f}, Recall: {test_recall:.4f}")
+            logger.info(f"Run {run+1} - Test Loss: {test_loss:.4f}, Test F1: {test_f1:.4f}, Accuracy: {test_accuracy:.4f}, Precision: {test_precision:.4f}, Recall: {test_recall:.4f}, TopK Precision: {test_topk_precision:.4f}, TopK Recall: {test_topk_recall:.4f}")
         
         # Log to wandb (including training history)
         wandb.log({
@@ -1005,6 +1033,8 @@ def evaluate_link_prediction_multiclass(
             f"downstream_link_multiclass/run_{run+1}/test_f1": test_f1,
             f"downstream_link_multiclass/run_{run+1}/test_precision": test_precision,
             f"downstream_link_multiclass/run_{run+1}/test_recall": test_recall,
+            f"downstream_link_multiclass/run_{run+1}/test_topk_precision": test_topk_precision,
+            f"downstream_link_multiclass/run_{run+1}/test_topk_recall": test_topk_recall,
             f"downstream_link_multiclass/run_{run+1}/training_history": history,
         })
     
@@ -1018,12 +1048,18 @@ def evaluate_link_prediction_multiclass(
         'test_precision_std': np.std(test_precisions),
         'test_recall_mean': np.mean(test_recalls),
         'test_recall_std': np.std(test_recalls),
+        'test_topk_precision_mean': np.mean(test_topk_precisions),
+        'test_topk_precision_std': np.std(test_topk_precisions),
+        'test_topk_recall_mean': np.mean(test_topk_recalls),
+        'test_topk_recall_std': np.std(test_topk_recalls),
         'test_acc_mean': np.mean(test_accuracies),
         'test_acc_std': np.std(test_accuracies),
         'test_f1_scores': test_f1_scores,
         'test_losses': test_losses,
         'test_precisions': test_precisions,
         'test_recalls': test_recalls,
+        'test_topk_precisions': test_topk_precisions,
+        'test_topk_recalls': test_topk_recalls,
         'test_accuracies': test_accuracies,
         'confusion_matrix': np.mean(confusion_matrices, axis=0),  # Average confusion matrix
         'confusion_matrices': confusion_matrices,  # All confusion matrices
@@ -1036,6 +1072,8 @@ def evaluate_link_prediction_multiclass(
     logger.info(f"Test F1: {results['test_f1_mean']:.4f} ± {results['test_f1_std']:.4f}")
     logger.info(f"Test Precision: {results['test_precision_mean']:.4f} ± {results['test_precision_std']:.4f}")
     logger.info(f"Test Recall: {results['test_recall_mean']:.4f} ± {results['test_recall_std']:.4f}")
+    logger.info(f"Test TopK Precision: {results['test_topk_precision_mean']:.4f} ± {results['test_topk_precision_std']:.4f}")
+    logger.info(f"Test TopK Recall: {results['test_topk_recall_mean']:.4f} ± {results['test_topk_recall_std']:.4f}")
     logger.info(f"Test Loss: {results['test_loss_mean']:.4f} ± {results['test_loss_std']:.4f}")
     
     # Log summary to wandb
@@ -1048,6 +1086,10 @@ def evaluate_link_prediction_multiclass(
         "downstream_link_multiclass/test_precision_std": results['test_precision_std'],
         "downstream_link_multiclass/test_recall_mean": results['test_recall_mean'],
         "downstream_link_multiclass/test_recall_std": results['test_recall_std'],
+        "downstream_link_multiclass/test_topk_precision_mean": results['test_topk_precision_mean'],
+        "downstream_link_multiclass/test_topk_precision_std": results['test_topk_precision_std'],
+        "downstream_link_multiclass/test_topk_recall_mean": results['test_topk_recall_mean'],
+        "downstream_link_multiclass/test_topk_recall_std": results['test_topk_recall_std'],
         "downstream_link_multiclass/test_loss_mean": results['test_loss_mean'],
         "downstream_link_multiclass/test_loss_std": results['test_loss_std'],
     })

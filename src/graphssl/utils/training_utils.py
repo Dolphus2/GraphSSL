@@ -236,11 +236,11 @@ def train_model(
     early_stopping_patience: int = 10,
     checkpoint_dir: Optional[str] = None,
     verbose: bool = True,
-    metric_for_best: str = "acc",
     disable_tqdm: bool = False
 ) -> Dict:
     """
     Train the model with early stopping using a specified training objective.
+    Model selection is always based on validation loss (lower is better).
     
     Args:
         model: The model to train
@@ -254,7 +254,6 @@ def train_model(
         early_stopping_patience: Patience for early stopping
         checkpoint_dir: Directory to save model checkpoints (if None, saves to current directory)
         verbose: Whether to print progress
-        metric_for_best: Metric to use for determining best model (default: 'acc')
         disable_tqdm: Whether to disable tqdm progress bars
     
     Returns:
@@ -273,14 +272,16 @@ def train_model(
     history.update({f"val_{name}": [] for name in metric_names})
     history["epoch_time"] = []
     
-    best_val_metric = 0.0 if metric_for_best == "acc" else float('inf')
+    best_val_loss = float('inf')
     best_epoch = 0
     patience_counter = 0
     global_step = 0
+    best_model_saved = False  # Track if we've saved at least one checkpoint
     
     logger.info(f"Starting training for {num_epochs} epochs")
     logger.info(f"Training objective: {objective.__class__.__name__}")
     logger.info(f"Tracking metrics: {metric_names}")
+    logger.info(f"Using 'loss' for model selection (lower is better)")
     
     for epoch in range(1, num_epochs + 1):
         start_time = time.time()
@@ -321,12 +322,13 @@ def train_model(
             val_str = " | ".join([f"Val {k.capitalize()}: {v:.4f}" for k, v in val_metrics.items()])
             print(f"Epoch {epoch:3d}/{num_epochs} | {train_str} | {val_str} | Time: {epoch_time:.2f}s")
         
-        # Early stopping and checkpointing
-        current_val_metric = val_metrics.get(metric_for_best, val_metrics.get('loss', 0.0))
-        is_better = (current_val_metric > best_val_metric) if metric_for_best == "acc" else (current_val_metric < best_val_metric)
+        # Early stopping and checkpointing based on validation loss
+        current_val_loss = val_metrics.get('loss', float('inf'))
+        is_better = current_val_loss < best_val_loss
         
-        if is_better:
-            best_val_metric = current_val_metric
+        # Save checkpoint if improved or if this is the first epoch (fallback)
+        if is_better or not best_model_saved:
+            best_val_loss = current_val_loss
             best_epoch = epoch
             patience_counter = 0
             # Save best model checkpoint
@@ -338,21 +340,34 @@ def train_model(
                 'train_metrics': train_metrics,
             }
             torch.save(checkpoint, best_model_path)
+            best_model_saved = True
             logger.debug(f"Saved best model checkpoint to {best_model_path}")
         else:
             patience_counter += 1
         
         if patience_counter >= early_stopping_patience:
             logger.info(f"Early stopping triggered at epoch {epoch}")
-            logger.info(f"Best validation {metric_for_best}: {best_val_metric:.4f} at epoch {best_epoch}")
+            logger.info(f"Best validation loss: {best_val_loss:.4f} at epoch {best_epoch}")
+            # Also log accuracy if available
+            if 'acc' in val_metrics:
+                logger.info(f"Final validation accuracy: {val_metrics['acc']:.4f}")
             break
     
-    # Load best model
-    checkpoint = torch.load(best_model_path, map_location=device)
-    model.load_state_dict(checkpoint['model_state_dict'])
+    # Load best model if it exists
+    if best_model_saved and Path(best_model_path).exists():
+        checkpoint = torch.load(best_model_path, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        logger.info(f"Loaded best model from epoch {best_epoch}")
+    else:
+        logger.warning(f"No checkpoint found at {best_model_path}, using final model state")
     
     logger.info(f"Training completed!")
-    logger.info(f"Best validation {metric_for_best}: {best_val_metric:.4f} at epoch {best_epoch}")
+    logger.info(f"Best validation loss: {best_val_loss:.4f} at epoch {best_epoch}")
+    # Also log best accuracy if it was tracked
+    if f"val_acc" in history and len(history["val_acc"]) > 0:
+        best_acc_idx = best_epoch - 1 if best_epoch > 0 else 0
+        if best_acc_idx < len(history["val_acc"]):
+            logger.info(f"Validation accuracy at best epoch: {history['val_acc'][best_acc_idx]:.4f}")
     
     return history
 
@@ -430,7 +445,6 @@ def extract_embeddings(
             y = batch[target_node_type].y[:batch_size]
             labels_list.append(y.cpu())
     
-    # Combine results
     embeddings = torch.cat(embeddings_list, dim=0)
     labels = torch.cat(labels_list, dim=0) if return_labels and labels_list else None
     

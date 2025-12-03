@@ -1,7 +1,7 @@
 #!/bin/bash
 #BSUB -J gssl_ssl_mse
-#BSUB -o logs/exp_ssl_node_sce_%J.out
-#BSUB -e logs/exp_ssl_node_sce_%J.err
+#BSUB -o logs/exp_ssl_node_mse_%J.out
+#BSUB -e logs/exp_ssl_node_mse_%J.err
 #BSUB -q gpua100
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -n 4
