@@ -69,7 +69,7 @@ python -m graphssl.main \
     --num_neighbors 30 30 \
     --batch_size 1024 \
     --epochs 100 \
-    --lr 0.0001 \
+    --lr 0.001 \
     --dropout 0.5 \
     --patience 20 \
     --num_workers 4 \
