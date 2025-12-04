@@ -1,8 +1,8 @@
 #!/bin/bash
-#BSUB -J gssl_ssl_tar
-#BSUB -o logs/exp_ssl_tar_%J.out
-#BSUB -e logs/exp_ssl_tar_%J.err
-#BSUB -q gpuv100
+#BSUB -J gssl_down_supnode
+#BSUB -o logs/downstream_supervised_node_%J.out
+#BSUB -e logs/downstream_supervised_node_%J.err
+#BSUB -q gpua40
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -n 4
 #BSUB -R "span[hosts=1]"
@@ -11,13 +11,12 @@
 #BSUB -B 
 #BSUB -N 
 #
-# Experiment: Self-Supervised TAR (Type-Aware Regularization)
-# Training: Type-aware regularization loss only (TAR component)
-# Encoder: GraphSAGE encoder with feature decoder
-# Submit: bsub < scripts/hpc/exp_ssl_tar.sh
+# Downstream Evaluation: Supervised Node Classification
+# Runs only multiclass link prediction downstream task
+# Submit: bsub < scripts/hpc/downstream/downstream_supervised_node.sh
 #
 
-echo "Starting Experiment: Self-Supervised TAR (Type-Aware Regularization)"
+echo "Starting Downstream Evaluation: Supervised Node Classification"
 echo "=============================================="
 echo "Job ID: $LSB_JOBID"
 echo "Hostname: $(hostname)"
@@ -42,7 +41,6 @@ cd ${ROOT}
 # Create necessary directories
 mkdir -p logs
 mkdir -p data
-mkdir -p results
 
 # Set environment variables
 export PYTHONUNBUFFERED=1
@@ -53,34 +51,22 @@ echo "GPU Information:"
 nvidia-smi
 echo ""
 
-# Run experiment
-python -m graphssl.main \
+# Run downstream evaluation
+python -m graphssl.downstream_evaluation \
     --data_root data \
-    --results_root results/exp_ssl_tar_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
-    --objective_type self_supervised_tarpfp \
+    --results_root results/downstream_supervised_node_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
+    --model_path results/exp_supervised_node_27276446_20251204_195325/model_supervised_node_classification.pt \
+    --objective_type supervised_node_classification \
     --target_node "paper" \
     --target_edge_type "paper,has_topic,field_of_study" \
     --use_feature_decoder \
     --use_edge_decoder \
-    --lambda_tar 1.0 \
-    --lambda_pfp 0.0 \
-    --mask_ratio 0.5 \
-    --neg_sampling_ratio 1.0 \
-    --tar_temperature 0.5 \
     --hidden_channels 128 \
     --num_layers 2 \
     --num_neighbors 30 30 \
     --batch_size 1024 \
-    --epochs 100 \
-    --lr 0.001 \
-    --dropout 0.5 \
-    --patience 5 \
     --num_workers 4 \
-    --weight_decay 0 \
-    --log_interval 10 \
-    --extract_embeddings \
-    --downstream_eval \
-    --downstream_task both \
+    --downstream_task multiclass_link \
     --downstream_n_runs 5 \
     --downstream_hidden_dim 128 \
     --downstream_num_layers 2 \

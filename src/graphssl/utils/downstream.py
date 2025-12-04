@@ -1370,7 +1370,7 @@ def run_downstream_evaluation(
             num_epochs=args.downstream_node_epochs,
             early_stopping_patience=args.downstream_patience,
             num_workers=args.num_workers,
-            verbose=True,
+            verbose=False,
             disable_tqdm=args.disable_tqdm
         )
         
