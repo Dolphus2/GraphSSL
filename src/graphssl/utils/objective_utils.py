@@ -201,6 +201,7 @@ class DownstreamLinkMulticlass(TrainingObjective):
         self.target_embeddings = target_embeddings.to(device)
         self.num_classes = target_embeddings.size(0)
         self.device = device
+        self.topk = topk
         self.eps = 1e-10
         self.neg_weight = 1.0
         self.gamma = 3
