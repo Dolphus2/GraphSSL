@@ -2,7 +2,7 @@
 #BSUB -J gssl_ssl_tarpfp
 #BSUB -o logs/exp_ssl_tarpfp_%J.out
 #BSUB -e logs/exp_ssl_tarpfp_%J.err
-#BSUB -q gpua100
+#BSUB -q gpua40
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -n 4
 #BSUB -R "span[hosts=1]"
@@ -82,14 +82,14 @@ python -m graphssl.main \
     --extract_embeddings \
     --downstream_eval \
     --downstream_task both \
-    --downstream_n_runs 10 \
+    --downstream_n_runs 5 \
     --downstream_hidden_dim 128 \
     --downstream_num_layers 2 \
     --downstream_dropout 0.5 \
     --multiclass_batch_size 256 \
     --downstream_node_epochs 100 \
-    --downstream_link_epochs 2 \
-    --downstream_patience 20 \
+    --downstream_link_epochs 1 \
+    --downstream_patience 4 \
     --downstream_lr 0.0001 \
     --edge_msg_pass_prop 0 0 0 \
     --seed 42 \
