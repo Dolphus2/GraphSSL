@@ -2,7 +2,7 @@
 #BSUB -J gssl_ssl_edge
 #BSUB -o logs/exp_ssl_edge_%J.out
 #BSUB -e logs/exp_ssl_edge_%J.err
-#BSUB -q gpua100
+#BSUB -q gpul40s
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -n 4
 #BSUB -R "span[hosts=1]"
