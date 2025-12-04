@@ -44,7 +44,7 @@ python -m graphssl.main \
     --downstream_n_runs 1 \
     --downstream_hidden_dim 128 \
     --downstream_num_layers 1 \
-    --downstream_node_epochs 2 \
+    --downstream_node_epochs 20 \
     --downstream_link_epochs 1 \
     --downstream_batch_size 1024 \
     --edge_msg_pass_prop 0.5 0.5 0.5 \

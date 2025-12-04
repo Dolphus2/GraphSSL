@@ -1297,54 +1297,7 @@ def run_downstream_evaluation(
         torch.save(node_results, node_results_path)
         logger.info(f"Node property prediction results saved to: {node_results_path}")
 
-    # Step 10b: Link prediction as multiclass (only for paper -> field_of_study)
-    # Run this first since it's much faster than regular link prediction
-
-    target_edge_type = tuple(args.target_edge_type.split(","))
-    if (args.downstream_task in ["link", "both", "multiclass_link"] and 
-        target_edge_type == ("paper", "has_topic", "field_of_study")):
-        
-        logger.info("="*80)
-        logger.info("Running link prediction as multiclass classification...")
-        logger.info("="*80)
-    
-        multiclass_results = evaluate_link_prediction_multiclass(
-            model=model,
-            train_data=train_data,
-            val_data=val_data,
-            test_data=test_data,
-            train_embeddings=train_embeddings,
-            train_edge_index=train_edge_index_remapped,
-            train_msg_passing_edges=train_msg_passing_edges_remapped,
-            val_embeddings=val_embeddings,
-            val_edge_index=val_edge_index_remapped,
-            val_msg_passing_edges=val_msg_passing_edges_remapped,
-            test_embeddings=test_embeddings,
-            test_edge_index=test_edge_index_remapped,
-            test_msg_passing_edges=test_msg_passing_edges_remapped,
-            target_edge_type=target_edge_type,
-            device=device,
-            n_runs=args.downstream_n_runs,
-            num_neighbors=args.num_neighbors,
-            hidden_dim=args.downstream_hidden_dim,
-            num_layers=args.downstream_num_layers,
-            dropout=args.downstream_dropout,
-            batch_size=args.multiclass_batch_size,
-            lr=args.downstream_lr,
-            weight_decay=args.downstream_weight_decay,
-            num_epochs=args.downstream_node_epochs,
-            early_stopping_patience=args.downstream_patience,
-            num_workers=args.num_workers,
-            verbose=False,
-            disable_tqdm=args.disable_tqdm
-        )
-        
-        # Save multiclass link prediction results
-        multiclass_results_path = results_path / "downstream_link_multiclass_results.pt"
-        torch.save(multiclass_results, multiclass_results_path)
-        logger.info(f"Link prediction multiclass results saved to: {multiclass_results_path}")
-
-    # Step 10c: Link prediction (regular - slower) This uses LinkNeighborLoader
+    # Step 10b: Link prediction (regular) This uses LinkNeighborLoader
     if args.downstream_task in ["link", "both"]:
         
         # Apply test mode optimization if needed
@@ -1380,4 +1333,49 @@ def run_downstream_evaluation(
         link_results_path = results_path / "downstream_link_results.pt"
         torch.save(link_results, link_results_path)
         logger.info(f"Link prediction results saved to: {link_results_path}")
+
+    # Step 10c: Link prediction as multiclass (only for paper -> field_of_study)
+    # Run this last since it can be memory-intensive
+    if (args.downstream_task in ["link", "both", "multiclass_link"] and 
+        target_edge_type == ("paper", "has_topic", "field_of_study")):
+        
+        logger.info("="*80)
+        logger.info("Running link prediction as multiclass classification...")
+        logger.info("="*80)
+    
+        multiclass_results = evaluate_link_prediction_multiclass(
+            model=model,
+            train_data=train_data,
+            val_data=val_data,
+            test_data=test_data,
+            train_embeddings=train_embeddings,
+            train_edge_index=train_edge_index_remapped,
+            train_msg_passing_edges=train_msg_passing_edges_remapped,
+            val_embeddings=val_embeddings,
+            val_edge_index=val_edge_index_remapped,
+            val_msg_passing_edges=val_msg_passing_edges_remapped,
+            test_embeddings=test_embeddings,
+            test_edge_index=test_edge_index_remapped,
+            test_msg_passing_edges=test_msg_passing_edges_remapped,
+            target_edge_type=target_edge_type,
+            device=device,
+            n_runs=args.downstream_n_runs,
+            num_neighbors=args.num_neighbors,
+            hidden_dim=args.downstream_hidden_dim,
+            num_layers=args.downstream_num_layers,
+            dropout=args.downstream_dropout,
+            batch_size=args.multiclass_batch_size,
+            lr=args.downstream_lr,
+            weight_decay=args.downstream_weight_decay,
+            num_epochs=args.downstream_node_epochs,
+            early_stopping_patience=args.downstream_patience,
+            num_workers=args.num_workers,
+            verbose=True,
+            disable_tqdm=args.disable_tqdm
+        )
+        
+        # Save multiclass link prediction results
+        multiclass_results_path = results_path / "downstream_link_multiclass_results.pt"
+        torch.save(multiclass_results, multiclass_results_path)
+        logger.info(f"Link prediction multiclass results saved to: {multiclass_results_path}")
 

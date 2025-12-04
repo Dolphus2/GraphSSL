@@ -204,7 +204,6 @@ class DownstreamLinkMulticlass(TrainingObjective):
         self.eps = 1e-10
         self.neg_weight = 1.0
         self.gamma = 3
-        self.topk = topk
         
     
     def step(
@@ -237,6 +236,11 @@ class DownstreamLinkMulticlass(TrainingObjective):
             projected_target_embeddings = self.target_embeddings
         
         logits = torch.matmul(projected_embeddings, projected_target_embeddings.T) # [batch_size, num_classes]
+        
+        # Free up memory immediately after computing logits
+        del projected_embeddings, projected_target_embeddings
+        
+        # Compute probabilities
         Ahat = torch.sigmoid(logits)
 
         src_idxs_local, trg_idxs_local = self.create_idxs_local(pos_targets_list)
@@ -269,26 +273,31 @@ class DownstreamLinkMulticlass(TrainingObjective):
             recall = tp / (tp + fn + self.eps)
             f1 = 2 * precision * recall / (precision + recall + self.eps)
             
-            # Compute top-K accuracy: for each sample, check if true positives are in top-K predictions
-            topk_values, topk_indices = torch.topk(Ahat, k=min(self.topk, Ahat.size(1)), dim=1)
+            # Compute top-K metrics more efficiently (only during evaluation to save memory/time)
+            topk_correct = 0
+            num_predicted_positive = 0
+            topk_precision = 0.0
+            topk_recall = 0.0
             
-            topk_is_positive = topk_values > 0.5  # [batch_size, k]
-            num_predicted_positive = topk_is_positive.sum().item()
-            
-            # Count how many true positives are in the top-K predictions
-            # Ensure all tensors are on the same device
-            src_idxs_local_device = src_idxs_local.to(Ahat.device)
-            trg_idxs_local_device = trg_idxs_local.to(Ahat.device)
-            
-            topk_indices_for_sources = topk_indices[src_idxs_local_device]  # [num_positive, k]
-            topk_is_positive_for_sources = topk_is_positive[src_idxs_local_device]  # [num_positive, k]
-            true_targets_expanded = trg_idxs_local_device.unsqueeze(1)  # [num_positive, 1]
-            is_match = (topk_indices_for_sources == true_targets_expanded)  # [num_positive, k]
-            is_in_topk_and_positive = (is_match & topk_is_positive_for_sources).any(dim=1)  # [num_positive]
-            topk_correct = is_in_topk_and_positive.sum().item()
-            
-            topk_precision = topk_correct / (num_predicted_positive + self.eps)  # Out of predicted positive in top-K
-            topk_recall = topk_correct / (num_positive + self.eps)  # Out of all true positives
+            if not is_training and num_positive > 0:
+                topk_k = min(self.topk, Ahat.size(1))
+                topk_values, topk_indices = torch.topk(Ahat, k=topk_k, dim=1)
+                
+                # Count how many top-k predictions exceed threshold and are in ground truth
+                src_idxs = src_idxs_local.to(Ahat.device)
+                trg_idxs = trg_idxs_local.to(Ahat.device)
+                
+                for src, trg in zip(src_idxs, trg_idxs):
+                    # Check if ground truth target is in top-k for this source
+                    is_in_topk = (topk_indices[src] == trg).any()
+                    if is_in_topk:
+                        # Check if prediction exceeds threshold
+                        if Ahat[src, trg] > 0.5:
+                            topk_correct += 1
+                            num_predicted_positive += 1
+                
+                topk_precision = topk_correct / (num_predicted_positive + self.eps)
+                topk_recall = topk_correct / (num_positive + self.eps)
         
         metrics = {
             "loss": loss.item(),
