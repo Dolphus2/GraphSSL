@@ -69,7 +69,7 @@ python -m graphssl.main \
     --epochs 100 \
     --lr 0.001 \
     --dropout 0.5 \
-    --patience 20 \
+    --patience 5 \
     --num_workers 4 \
     --weight_decay 0 \
     --log_interval 10 \
