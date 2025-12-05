@@ -14,6 +14,10 @@
 #   gpua10   - Variable availability, A10 (24GB, Ampere)
 #
 
+# GPU queues to cycle through when GPU_QUEUE=all
+GPU_LIST=(gpul40s gpua100 gpuv100 gpua10 gpua40)
+GPU_IDX=0
+
 # Set GPU queue (default: gpul40s for best performance and availability)
 GPU_QUEUE="${1:-gpul40s}"
 
@@ -44,13 +48,23 @@ submit_experiment() {
     local exp_name="$2"
     local script_path="scripts/hpc/$script_name"
     local temp_script="$TEMP_DIR/$script_name"
+    local exp_queue
+
+    # Decide which GPU queue to use
+    if [ "$GPU_QUEUE" = "all" ]; then
+        local list_len=${#GPU_LIST[@]}
+        exp_queue="${GPU_LIST[$GPU_IDX]}"
+        GPU_IDX=$(( (GPU_IDX + 1) % list_len ))
+    else
+        exp_queue="$GPU_QUEUE"
+    fi
     
     # Copy and modify the queue and edge_msg_pass_prop in the script
-    sed -e "s/#BSUB -q [a-z0-9]*/#BSUB -q $GPU_QUEUE/g" \
-        -e "s/--edge_msg_pass_prop [0-9.]* [0-9.]* [0-9.]*$/--edge_msg_pass_prop $EDGE_MSG_PASS \\\\/g" \
+    sed -e "s/#BSUB -q [a-z0-9]*/#BSUB -q $exp_queue/g" \
+        -e "s/--edge_msg_pass_prop [0-9.]* [0-9.]* [0-9.]*\(.*\)$/--edge_msg_pass_prop $EDGE_MSG_PASS\1/g" \
         "$script_path" > "$temp_script"
-    
-    echo "$exp_name"
+
+    echo "$exp_name (queue: $exp_queue)"
     bsub < "$temp_script"
 }
 
