@@ -17,7 +17,7 @@
 # Submit: bsub < scripts/hpc/exp_ssl_node_sce.sh
 #
 
-echo "Starting Experiment: Self-Supervised Node Reconstruction (SCE)"
+echo "Starting Experiment: Self-Supervised Node Reconstruction (MSE)"
 echo "=============================================="
 echo "Job ID: $LSB_JOBID"
 echo "Hostname: $(hostname)"
@@ -56,7 +56,7 @@ echo ""
 # Run experiment
 python -m graphssl.main \
     --data_root data \
-    --results_root results/exp_ssl_node_sce_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
+    --results_root results/exp_ssl_node_mse_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
     --objective_type self_supervised_node \
     --loss_fn mse \
     --target_node "paper" \

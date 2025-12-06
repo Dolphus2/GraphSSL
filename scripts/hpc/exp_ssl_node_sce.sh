@@ -2,7 +2,7 @@
 #BSUB -J gssl_ssl_sce
 #BSUB -o logs/exp_ssl_node_sce_%J.out
 #BSUB -e logs/exp_ssl_node_sce_%J.err
-#BSUB -q gpua10
+#BSUB -q gpua100
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -n 4
 #BSUB -R "span[hosts=1]"
@@ -82,7 +82,7 @@ python -m graphssl.main \
     --downstream_hidden_dim 128 \
     --downstream_num_layers 2 \
     --downstream_dropout 0.5 \
-    --multiclass_batch_size 256 \
+    --multiclass_batch_size 64 \
     --downstream_node_epochs 100 \
     --downstream_link_epochs 1 \
     --downstream_patience 4 \

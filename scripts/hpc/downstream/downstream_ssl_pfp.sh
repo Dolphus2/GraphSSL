@@ -6,7 +6,7 @@
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -n 4
 #BSUB -R "span[hosts=1]"
-#BSUB -R "rusage[mem=4GB]"
+#BSUB -R "rusage[mem=8GB]"
 #BSUB -W 24:00 
 #BSUB -B 
 #BSUB -N 
@@ -55,7 +55,7 @@ echo ""
 python -m graphssl.downstream_evaluation \
     --data_root data \
     --results_root results/downstream_ssl_pfp_${LSB_JOBID}_$(date +%Y%m%d_%H%M%S) \
-    --metapath2vec_embeddings_path pos_embedding.pt \
+    --model_path results/exp_ssl_pfp_27276457_20251205_170628/model_self_supervised_node.pt \
     --model_path results/exp_ssl_pfp_JOBID_TIMESTAMP/model_self_supervised_tarpfp.pt \
     --objective_type self_supervised_tarpfp \
     --target_node "paper" \
@@ -77,7 +77,7 @@ python -m graphssl.downstream_evaluation \
     --downstream_hidden_dim 128 \
     --downstream_num_layers 2 \
     --downstream_dropout 0.5 \
-    --multiclass_batch_size 256 \
+    --multiclass_batch_size 64 \
     --downstream_node_epochs 100 \
     --downstream_link_epochs 1 \
     --downstream_patience 4 \

@@ -6,7 +6,7 @@
 #BSUB -gpu "num=1:mode=exclusive_process"
 #BSUB -n 4
 #BSUB -R "span[hosts=1]"
-#BSUB -R "rusage[mem=4GB]"
+#BSUB -R "rusage[mem=8GB]"
 #BSUB -W 24:00 
 #BSUB -B 
 #BSUB -N 
@@ -76,7 +76,7 @@ python -m graphssl.downstream_evaluation \
     --downstream_hidden_dim 128 \
     --downstream_num_layers 2 \
     --downstream_dropout 0.5 \
-    --multiclass_batch_size 256 \
+    --multiclass_batch_size 64 \
     --downstream_node_epochs 100 \
     --downstream_link_epochs 1 \
     --downstream_patience 4 \

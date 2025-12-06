@@ -1,6 +1,19 @@
 # GraphSSL
 DTU Deep Learning Project: Self-supervised Graph Representation Learning
 
+## Overview
+
+This project explores self-supervised and supervised learning objectives for heterogeneous graph representation learning on the OGBN-MAG academic citation network. We evaluate eight training objectives across multiple downstream tasks to assess embedding quality and generalizability.
+
+### Downstream Prediction Architecture
+
+<!-- ![Downstream Prediction Head](docs/images/downstream_head.png) -->
+*Figure 1: Downstream evaluation framework showing frozen encoder with task-specific prediction heads for node classification, binary link prediction, and multi-label field-of-study prediction.*
+
+### Data Split Strategy
+
+<!-- ![Node Data Split](docs/images/data_split.png) -->
+*Figure 2: Train/validation split showing train and validation nodes and edges along with message passing edges. Split are made inductively and edges are split dependent on the node split, meaning that all validation edges are incident to validation nodes, simulating a new paper node appearing with all of its links. Message passing edges (black) provide structural context with configurable retention ratios (ρ).*
 ## Installation
 
 From the GraphSSL root directory:
@@ -17,18 +30,55 @@ pip install -e ".[dev,notebook]"
 
 **Run commands from the GraphSSL root directory.**
 
+### Training
+
 ```bash
-# Test setup
-python -m graphssl.test_pipeline
+# Self-supervised node reconstruction (SCE loss)
+python -m graphssl.main \
+    --objective_type self_supervised_node \
+    --loss_fn sce \
+    --epochs 50 \
+    --patience 5 \
+    --downstream_task node link
 
-# Run pipeline
-python -m graphssl.main --epochs 10
+# Self-supervised TAR+PFP
+python -m graphssl.main \
+    --objective_type self_supervised_tarpfp \
+    --lambda_tar 1.0 \
+    --lambda_pfp 1.0 \
+    --epochs 50
 
-# Or use the installed command
-graphssl --epochs 10
+# Supervised node classification
+python -m graphssl.main \
+    --objective_type supervised_node \
+    --epochs 50
 ```
 
-See [QUICKSTART.md](QUICKSTART.md) for detailed instructions.
+### Downstream Evaluation Only
+
+```bash
+# Evaluate pre-trained model
+python -m graphssl.downstream_evaluation \
+    --model_path results/exp_ssl_node_sce_*/model_self_supervised_node.pt \
+    --objective_type self_supervised_node \
+    --downstream_task multiclass_link \
+    --downstream_n_runs 5
+```
+
+### HPC Batch Submission
+
+```bash
+# Submit all training experiments
+cd scripts/hpc
+bsub < exp_ssl_node_sce.sh
+bsub < exp_ssl_tarpfp.sh
+# ... or submit all at once
+
+# Submit all downstream evaluations
+bash submit_all_downstream.sh
+```
+
+See [QUICKSTART.md](QUICKSTART.md) for detailed instructions
 
 ## Project Structure
 
@@ -37,25 +87,67 @@ GraphSSL/
 ├── src/
 │   └── graphssl/           # Main package
 │       ├── __init__.py
-│       ├── main.py         # Main pipeline script
-│       ├── test_pipeline.py # Setup verification
-│       ├── run_examples.sh  # Example configurations
-│       ├── run_hpc.sh      # HPC submission script
+│       ├── main.py         # Main training pipeline
+│       ├── downstream_evaluation.py  # Standalone downstream evaluation
 │       └── utils/          # Utility modules
 │           ├── __init__.py
-│           ├── data_utils.py
-│           ├── models.py
-│           └── training_utils.py
+│           ├── args_utils.py        # Argument parsing
+│           ├── data_utils.py        # Data loading and preprocessing
+│           ├── downstream.py        # Downstream evaluation logic
+│           ├── graphsage.py         # GraphSAGE model implementation
+│           ├── models.py            # Neural network components
+│           ├── objective_utils.py   # Training objective classes
+│           ├── plotting_utils.py    # Visualization utilities
+│           └── training_utils.py    # Training loops and utilities
+├── scripts/
+│   ├── hpc/                # HPC job submission scripts
+│   │   ├── exp_*.sh        # Training experiment scripts (8)
+│   │   ├── downstream/     # Downstream evaluation scripts (8)
+│   │   └── set_env.sh      # Environment configuration
+│   ├── Results_mass.ipynb  # Results analysis notebook
+│   └── PlayGround.ipynb    # Development notebook
 ├── data/                   # Dataset storage (auto-created)
-├── results/               # Training outputs (auto-created)
-├── requirements.txt       # Python dependencies
-├── QUICKSTART.md         # Quick start guide
-└── README.md             # This file
+│   └── mag/                # OGBN-MAG dataset
+├── results/                # Training outputs (auto-created)
+│   ├── exp_*/              # Training run results
+│   └── downstream_*/       # Downstream evaluation results
+├── logs/                   # HPC job logs
+├── docs/                   # Documentation
+├── tests/                  # Unit tests
+├── requirements.txt        # Python dependencies
+├── pyproject.toml         # Package configuration
+├── QUICKSTART.md          # Quick start guide
+└── README.md              # This file
 ```
+
+## Features
+
+- **8 Training Objectives**: Supervised (node classification, link prediction) and self-supervised (feature reconstruction with MSE/SCE, edge reconstruction, TAR, PFP, TAR+PFP)
+- **3 Downstream Tasks**: Node classification (venue prediction), binary link prediction, multi-label link prediction (field-of-study)
+- **Heterogeneous GNN**: GraphSAGE with relation-specific aggregation and type-specific transformations
+- **Flexible Edge Masking**: Configurable message passing edge retention ratios (ρ) for ablation studies
+- **Comprehensive Evaluation**: Multiple runs with statistical significance testing, top-K ranking metrics
+- **HPC Ready**: Optimized batch scripts for SLURM/LSF job schedulers with automatic checkpointing
 
 ## Documentation
 
-- [QUICKSTART.md](QUICKSTART.md) - Quick start guide
-- [src/graphssl/README.md](src/graphssl/README.md) - Detailed documentation
-- [docs/DOWNSTREAM_EVALUATION.md](docs/DOWNSTREAM_EVALUATION.md) - Downstream evaluation guide
-- [IMPLEMENTATION_SUMMARY.md](IMPLEMENTATION_SUMMARY.md) - Implementation details 
+- [QUICKSTART.md](QUICKSTART.md) - Quick start guide with basic examples
+- [README_HPC.md](README_HPC.md) - HPC-specific instructions for DTU cluster
+- [src/graphssl/README.md](src/graphssl/README.md) - Detailed API documentation
+
+## Key Results
+
+Structure-based self-supervised methods (TAR, PFP, TAR+PFP) significantly outperform feature reconstruction approaches on downstream tasks:
+
+| Method | Node Classification | Binary Link Pred | Multi-label Top-20 Recall |
+|--------|-------------------|------------------|--------------------------|
+| Supervised Node | 0.374 ± 0.002 | 0.898 ± 0.002 | - |
+| TAR+PFP | 0.243 ± 0.003 | 0.879 ± 0.006 | 0.236 ± 0.003 |
+| PFP | 0.237 ± 0.005 | 0.879 ± 0.005 | 0.236 ± 0.004 |
+| Feature Recon (SCE) | 0.064 ± 0.001 | 0.892 ± 0.006 | 0.224 ± 0.008 |
+
+*Table: Test performance on OGBN-MAG with no context edges (ρ=1,1,1). Multi-label task uses 59,965 field-of-study classes.*
+
+## License
+
+MIT License - see LICENSE file for details.

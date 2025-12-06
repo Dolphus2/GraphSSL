@@ -243,6 +243,7 @@ class DownstreamLinkMulticlass(TrainingObjective):
         
         # Compute probabilities
         Ahat = torch.sigmoid(logits)
+        del logits
 
         src_idxs_local, trg_idxs_local = self.create_idxs_local(pos_targets_list)
         msg_pass_src_idxs, msg_pass_trg_idxs = self.create_idxs_local(msg_pass_targets_list)
@@ -288,17 +289,29 @@ class DownstreamLinkMulticlass(TrainingObjective):
                 src_idxs = src_idxs_local.to(Ahat.device)
                 trg_idxs = trg_idxs_local.to(Ahat.device)
                 
-                for src, trg in zip(src_idxs, trg_idxs):
-                    # Check if ground truth target is in top-k for this source
-                    is_in_topk = (topk_indices[src] == trg).any()
-                    if is_in_topk:
-                        # Check if prediction exceeds threshold
-                        if Ahat[src, trg] > 0.5:
-                            topk_correct += 1
-                            num_predicted_positive += 1
+                batch_topk = topk_indices[src_idxs]  # [num_positive, topk_k]
+                is_in_topk = (batch_topk == trg_idxs.unsqueeze(1)).any(dim=1)  # [num_positive]
+                
+                predictions_at_gt = Ahat[src_idxs, trg_idxs]  # [num_positive]
+                exceeds_threshold = predictions_at_gt > 0.5
+                
+                # Count correct predictions
+                topk_correct = (is_in_topk & exceeds_threshold).sum().item()
+                num_predicted_positive = is_in_topk.sum().item()
+
+                # for src, trg in zip(src_idxs, trg_idxs):
+                #     # Check if ground truth target is in top-k for this source
+                #     is_in_topk = (topk_indices[src] == trg).any()
+                #     if is_in_topk:
+                #         # Check if prediction exceeds threshold
+                #         if Ahat[src, trg] > 0.5:
+                #             topk_correct += 1
+                #             num_predicted_positive += 1
                 
                 topk_precision = topk_correct / (num_predicted_positive + self.eps)
                 topk_recall = topk_correct / (num_positive + self.eps)
+
+                del topk_values, topk_indices, batch_topk, is_in_topk, predictions_at_gt, exceeds_threshold
         
         metrics = {
             "loss": loss.item(),

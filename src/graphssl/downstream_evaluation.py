@@ -16,6 +16,7 @@ def run_pipeline(args):
     """Runs the GraphSSL downstream evaluation pipeline based on provided arguments."""
     data_path = Path(args.data_root)
     results_path = Path(args.results_root)
+    results_path.mkdir(parents=True, exist_ok=True)
     model_path = Path(args.model_path) if args.model_path else results_path / "model_supervised_node_classification.pt"
     
     # Check if model exists
