@@ -6,13 +6,11 @@ DTU Deep Learning Project: Self-supervised Graph Representation Learning
 This project explores self-supervised and supervised learning objectives for heterogeneous graph representation learning on the OGBN-MAG academic citation network. We evaluate eight training objectives across multiple downstream tasks to assess embedding quality and generalizability.
 
 ### Downstream Prediction Architecture
-
-<!-- ![Downstream Prediction Head](docs/images/downstream_head.png) -->
-*Figure 1: Downstream evaluation framework showing frozen encoder with task-specific prediction heads for node classification, binary link prediction, and multi-label field-of-study prediction.*
+![DownstreamArchitecture](https://github.com/user-attachments/assets/3770beaa-1101-4a60-b457-c8ac87f37e71)
+*Figure 1: Downstream evaluation framework showing task-specific prediction heads for node classification, binary link prediction, and multi-label field-of-study prediction.*
 
 ### Data Split Strategy
-
-<!-- ![Node Data Split](docs/images/data_split.png) -->
+![Split2](https://github.com/user-attachments/assets/1d61821f-bc5a-438e-b563-a31fc2f827f9)
 *Figure 2: Train/validation split showing train and validation nodes and edges along with message passing edges. Split are made inductively and edges are split dependent on the node split, meaning that all validation edges are incident to validation nodes, simulating a new paper node appearing with all of its links. Message passing edges (black) provide structural context with configurable retention ratios (ρ).*
 ## Installation
 
