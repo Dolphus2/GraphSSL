@@ -231,10 +231,10 @@ class DownstreamLinkMulticlass(TrainingObjective):
         projected_embeddings = self.decoder(source_embeddings)
         
         # Project target embeddings if target_decoder is provided
-        if self.target_decoder is not None:
-            projected_target_embeddings = self.target_decoder(self.target_embeddings)
-        else:
-            projected_target_embeddings = self.target_embeddings
+        # if self.target_decoder is not None:
+        #     projected_target_embeddings = self.target_decoder(self.target_embeddings)
+        # else:
+        projected_target_embeddings = self.target_embeddings
         
         logits = torch.matmul(projected_embeddings, projected_target_embeddings.T) # [batch_size, num_classes]
         
