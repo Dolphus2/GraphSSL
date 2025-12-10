@@ -1147,7 +1147,7 @@ def run_downstream_evaluation(
         val_labels = embeddings_data['val_labels']
         test_embeddings = embeddings_data['test_embeddings']
         test_labels = embeddings_data['test_labels']
-        global_embeddings = embeddings_data['global_embeddings']
+        # global_embeddings = embeddings_data['global_embeddings']
     else:
         # Extract embeddings from datasets (no need to create loaders separately)
         logger.info("Extracting embeddings from datasets...")
@@ -1181,13 +1181,13 @@ def run_downstream_evaluation(
         val_labels = embeddings_data['val_labels']
         test_embeddings = embeddings_data['test_embeddings']
         test_labels = embeddings_data['test_labels']
-        global_embeddings = embeddings_data['global_embeddings']
+        # global_embeddings = embeddings_data['global_embeddings']
 
     # Debug: Print embedding shapes
     logger.debug(f"Train embeddings shape: {train_embeddings.shape}, Train labels shape: {train_labels.shape}")
     logger.debug(f"Val embeddings shape: {val_embeddings.shape}, Val labels shape: {val_labels.shape}")
     logger.debug(f"Test embeddings shape: {test_embeddings.shape}, Test labels shape: {test_labels.shape}")
-    logger.debug(f"Global embeddings shape: {global_embeddings.shape}")
+    # logger.debug(f"Global embeddings shape: {global_embeddings.shape}")
     
     train_edge_index, val_edge_index, test_edge_index = edge_splits
 
