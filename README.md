@@ -13,7 +13,7 @@ This project explores self-supervised and supervised learning objectives for het
 ![Split2](https://github.com/user-attachments/assets/1d61821f-bc5a-438e-b563-a31fc2f827f9)
 *Figure 2: Train/validation split showing train and validation nodes and edges along with message passing edges. Split are made inductively and edges are split dependent on the node split, meaning that all validation edges are incident to validation nodes, simulating a new paper node appearing with all of its links. Message passing edges (black) provide structural context with configurable retention ratios (ρ).*
 ## Demonstration
-It is recommended to run the package using shell scripts as demonstrated in scripts/ , but there is the demonstration Jupyter notebook scripts/graphssl_demonstration.ipynb included for demonstration purposes.
+It is recommended to run the package using shell scripts as demonstrated in scripts/ , but there are two demonstration Jupyter notebooks scripts/graphssl_demonstration.ipynb and scripts/graphssl_demonstration_downstream.ipynb included for demonstration purposes. Note that for full runs these require a lot of RAM and can be fiddly to run. It is strongly recommended to run the project code using shell scripts instead of jupyter notebooks.
 
 ## Installation
 
@@ -108,6 +108,7 @@ GraphSSL/
 │   ├── Results.ipynb       # Results analysis notebook
 │   ├── ExploratoryAnalysis.ipynb       # Initial dataset analysis
 │   ├── graphssl_demonstration.ipynb    # Demonstration notebook
+│   ├── graphssl_demonstration_downstream.ipynb    # More modular demonstration notebook
 │   └── run_project_experiments.sh      # Demonstration experiment shell script
 ├── data/                   # Dataset storage (auto-created)
 │   └── mag/                # OGBN-MAG dataset
