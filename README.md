@@ -105,16 +105,17 @@ GraphSSL/
 │   │   ├── exp_*.sh        # Training experiment scripts (8)
 │   │   ├── downstream/     # Downstream evaluation scripts (8)
 │   │   └── set_env.sh      # Environment configuration
-│   ├── Results_mass.ipynb  # Results analysis notebook
-│   └── PlayGround.ipynb    # Development notebook
+│   ├── Results.ipynb       # Results analysis notebook
+│   ├── ExploratoryAnalysis.ipynb       # Initial dataset analysis
+│   ├── graphssl_demonstration.ipynb    # Demonstration notebook
+│   └── run_project_experiments.sh      # Demonstration experiment shell script
 ├── data/                   # Dataset storage (auto-created)
 │   └── mag/                # OGBN-MAG dataset
 ├── results/                # Training outputs (auto-created)
 │   ├── exp_*/              # Training run results
 │   └── downstream_*/       # Downstream evaluation results
 ├── logs/                   # HPC job logs
-├── docs/                   # Documentation
-├── tests/                  # Unit tests
+├── tests/                  # Unit tests 
 ├── requirements.txt        # Python dependencies
 ├── pyproject.toml         # Package configuration
 ├── QUICKSTART.md          # Quick start guide
